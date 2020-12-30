@@ -10,11 +10,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-2019, macos-10.14, ubuntu-18.04, ubuntu-20.04]
-        python-version: [3.8.5, 3.7.6]
+        python-version: [3.6.10, 3.7.6]
         exclude:
           - os: windows-2019
             python-version: 3.7.6
-          - os: macos-10.15
+          - os: macos-10.14
             python-version: 3.7.6
           - os: ubuntu-20.04
             python-version: 3.7.6
@@ -52,7 +52,7 @@ jobs:
 
     - name: mac run tests
       if: matrix.os == 'macos-10.14'
-      shell: bash
+      shell: shell: 'script -q -c "bash {0}"'
       run: |
          pip3 install setuptools wheel
          pip3 install .
