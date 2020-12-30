@@ -10,13 +10,21 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-2019, macos-10.15, ubuntu-18.04, ubuntu-20.04]
+        python-version: [3.8.5, 3.7.6]
+      exclude:
+        - os: windows-2019
+          python-version: 3.7.6
+        - os: macos-10.15
+          python-version: 3.7.6
+        - os: ubuntu-20.04
+          python-version: 3.7.6
     steps:
     - uses: actions/checkout@v2
 
     - name: Set up Python
       uses: actions/setup-python@v2
       with:
-        python-version: '3.8.5'
+        python-version: ${{ matrix.python-version }}
 
     - name: Set up MSVC
       if: matrix.os == 'windows-2019'
@@ -29,6 +37,7 @@ jobs:
               powershell Start-Process -PassThru -Wait PowerShell -ArgumentList "'-Command Set-MpPreference -DisableArchiveScanning \$true'"
               powershell Start-Process -PassThru -Wait PowerShell -ArgumentList "'-Command Set-MpPreference -DisableBehaviorMonitoring \$true'"
               powershell Start-Process -PassThru -Wait PowerShell -ArgumentList "'-Command Set-MpPreference -DisableRealtimeMonitoring \$true'"
+              powershell Add-MpPreference -ExclusionPath $GITHUB_WORKSPACE
               pip3 install setuptools wheel
               pip3 install .
               cmd.exe //C 'examples\scripts\dllscollector.bat'
