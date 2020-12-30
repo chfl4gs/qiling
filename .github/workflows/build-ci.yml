@@ -49,8 +49,8 @@ jobs:
          cd $GITHUB_WORKSPACE/tests
          cmd.exe //C '.\test_pe.bat'
 
-    - name: *nix run tests
-      if: ${{ matrix.os != 'windows-2019' }}
+    - name: nix run tests
+      if:  ${{ matrix.os != 'windows-2019' }}
       shell: 'script -q -e -c "bash {0}"'
       run: |
         if [ ${{ matrix.os }} == 'ubuntu-18.04' ] && [ ${{ matrix.python-version }} == '3.7.6' ]; then
