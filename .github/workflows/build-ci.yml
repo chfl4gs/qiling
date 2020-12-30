@@ -26,11 +26,9 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
 
-    - name: Setup MSVC
+    - name: win run tests
       if: matrix.os == 'windows-2019'
       uses: microsoft/setup-msbuild@v1
-
-    - name: win run tests
       shell: bash
       run: |
          powershell Start-Process -PassThru -Wait PowerShell -ArgumentList "'-Command Set-MpPreference -DisableArchiveScanning \$true'"
