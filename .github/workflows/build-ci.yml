@@ -33,7 +33,12 @@ jobs:
     - name: Run tests
       shell: bash
       run: |
-        if [ ${{ matrix.os }} == 'windows-2019' ]; then
+        if [ ${{ matrix.os }} == 'ubuntu-18.04 ] && [ ${{ matrix.python-version }} == '3.7.6' ]; then
+              pip3 install setuptools wheel flake8
+              flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+              pip3 install .
+              cd tests && ./test_elf.sh
+        elif [ ${{ matrix.os }} == 'windows-2019' ]; then
               powershell Start-Process -PassThru -Wait PowerShell -ArgumentList "'-Command Set-MpPreference -DisableArchiveScanning \$true'"
               powershell Start-Process -PassThru -Wait PowerShell -ArgumentList "'-Command Set-MpPreference -DisableBehaviorMonitoring \$true'"
               powershell Start-Process -PassThru -Wait PowerShell -ArgumentList "'-Command Set-MpPreference -DisableRealtimeMonitoring \$true'"
