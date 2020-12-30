@@ -52,7 +52,7 @@ jobs:
 
     - name: mac run tests
       if: matrix.os == 'macos-10.14'
-      shell: shell: 'script -q -c "bash {0}"'
+      shell: 'script -q -c "bash {0}"'
       run: |
          pip3 install setuptools wheel
          pip3 install .
