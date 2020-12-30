@@ -10,7 +10,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-2019, macos-10.14, ubuntu-18.04, ubuntu-20.04]
-        python-version: [3.6.10, 3.7.6]
+        python-version: [3.6.8, 3.7.6]
         exclude:
           - os: windows-2019
             python-version: 3.7.6
