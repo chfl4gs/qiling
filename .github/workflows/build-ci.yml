@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2019, macos-10.15, ubuntu-18.04, ubuntu-20.04]
+        os: [windows-2019, macos-10.14, ubuntu-18.04, ubuntu-20.04]
         python-version: [3.8.5, 3.7.6]
         exclude:
           - os: windows-2019
@@ -50,8 +50,20 @@ jobs:
          cd $GITHUB_WORKSPACE/tests
          cmd.exe //C '.\test_pe.bat'
 
-    - name: nix run tests
-      if:  ${{ matrix.os != 'windows-2019' }}
+    - name: mac run tests
+      if: matrix.os == 'macos-10.14'
+      shell: bash
+      run: |
+         pip3 install setuptools wheel
+         pip3 install .
+         ./examples/scripts/dylibcollector.sh
+         cd $GITHUB_WORKSPACE/examples/rootfs/x8664_macos/kext
+         unzip -Pinfected SuperRootkit.kext.zip
+         cd $GITHUB_WORKSPACE/tests
+         ./test_macho.sh
+
+    - name: linux run tests
+      if:  ${{ matrix.os != 'windows-2019' }} && ${{ matrix.os != 'macos-10.14' }}
       shell: 'script -q -e -c "bash {0}"'
       run: |
         if [ ${{ matrix.os }} == 'ubuntu-18.04' ] && [ ${{ matrix.python-version }} == '3.7.6' ]; then
@@ -59,14 +71,6 @@ jobs:
               flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
               pip3 install .
               cd tests && ./test_elf.sh
-        elif [ ${{ matrix.os }} == 'macos-10.15' ]; then
-              pip3 install setuptools wheel
-              pip3 install .
-              ./examples/scripts/dylibcollector.sh
-              cd $GITHUB_WORKSPACE/examples/rootfs/x8664_macos/kext
-              unzip -Pinfected SuperRootkit.kext.zip
-              cd $GITHUB_WORKSPACE/tests
-              ./test_macho.sh
         elif [ ${{ matrix.os }} == 'ubuntu-20.04' ]; then
               docker run -it --rm -v ${GITHUB_WORKSPACE}:/qiling qilingframework/qiling:dev bash -c "pip3 install . && cd tests && ./test_elf.sh"
         else
