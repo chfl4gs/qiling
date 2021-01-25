@@ -2,34 +2,34 @@ language: shell
 matrix:
   fast_finish: true
   include:
-    - name: "Python 3.7 on OSX"
-      os: osx
-      osx_image: xcode10.1
+    - name: "Python 3.6.8 on Windows test"
+      os: windows
       language: shell
+      env:
+        - PATH="/c/Python36:/c/Python36/Scripts:$PATH"
       cache:
         directories:
-          - $HOME/Library/Caches/pip
-#          - $HOME/dist/
+          - $HOME/AppData/Local/pip/Cache
+          - /c/Python36
       before_install:
-        - pip3 install --upgrade pip
+        - | 
+          if [[ ! -f /c/Python36/python ]]; then 
+               choco install python --version=3.6.8
+          fi
+        - powershell Start-Process -PassThru -Wait PowerShell -ArgumentList "'-Command Set-MpPreference -DisableArchiveScanning \$true'"
+        - powershell Start-Process -PassThru -Wait PowerShell -ArgumentList "'-Command Set-MpPreference -DisableBehaviorMonitoring \$true'"
+        - powershell Start-Process -PassThru -Wait PowerShell -ArgumentList "'-Command Set-MpPreference -DisableRealtimeMonitoring \$true'"
       install:
-#        - pip3 install wheel 'capstone>=4.0.1' 'pefile>=2019.4.18' 'python-registry>=1.3.1' 'unicorn>=1.0.2rc4'
-#        - |
-#          if [ ! -f $HOME/dist/keystone*.whl ]; then
-#               git clone https://github.com/keystone-engine/keystone && \
-#               cd keystone/bindings/python && \
-#               sudo python3 setup.py install bdist_wheel && \
-#               cp dist/*.whl $HOME/dist/;
-#          else
-#              sudo pip3 install $HOME/dist/*.whl;
-#          fi
-        - cd $TRAVIS_BUILD_DIR 
-        - pip3 install . # Workaround since building from keystone sources doesn't work on Macos. Not sure why and I guess it's due to Travis. :/
+        - cd $TRAVIS_BUILD_DIR
+        - pip3 install .
       before_script:
-        - ./examples/scripts/dylibcollector.sh
-        - cd $TRAVIS_BUILD_DIR/examples/rootfs/x8664_macos/kext
-        - unzip -Pinfected SuperRootkit.kext.zip
-        - cd $TRAVIS_BUILD_DIR/tests        
+        - cmd.exe //C 'examples\scripts\dllscollector.bat'
+        - cd $TRAVIS_BUILD_DIR/examples/rootfs/x86_windows/bin
+        - unzip -Pinfected wannacry.bin.zip
+        - unzip -Pinfected UselessDisk.bin.zip
+        - unzip -Pinfected GandCrab502.bin.zip
+        - unzip -Pinfected al-khaser.bin.zip
+        - unzip -Pinfected sality.dll.zip
+        - cd $TRAVIS_BUILD_DIR/tests
       script:
-        - ./test_macho.sh
-        
+        - cmd.exe //C '.\test_pe.bat'
