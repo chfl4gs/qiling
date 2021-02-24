@@ -14,32 +14,34 @@ jobs:
           command: |
             brew install wget cmake
 
-      - restore_cache:
-          keys:
-            - python-{{ .Environment.CIRCLE_JOB }}-3.7.0-macos-10.13.6
+      #- restore_cache:
+      #    keys:
+      #      - python-{{ .Environment.CIRCLE_JOB }}-3.7.0-macos-10.13.6
 
       - run: 
           name: "Install qiling framework"
           command: |
-            pip3 install --upgrade pip
-            pip3 install wheel setuptools
-            pip3 install .
+            #pip3 install --upgrade pip
+            #pip3 install wheel setuptools
+            #pip3 install .
             ./examples/scripts/dylibcollector.sh
-            cd examples/rootfs/x8664_macos/kext
-            unzip -Pinfected SuperRootkit.kext.zip
+            #cd examples/rootfs/x8664_macos/kext
+            #unzip -Pinfected SuperRootkit.kext.zip
 
-      - save_cache:
-          paths:
-            - ~/Library/Caches/pip
-          key: python-{{ .Environment.CIRCLE_JOB }}-3.7.0-macos-10.13.6
+      #- save_cache:
+      #    paths:
+      #      - ~/Library/Caches/pip
+      #    key: python-{{ .Environment.CIRCLE_JOB }}-3.7.0-macos-10.13.6
 
-      - run:
-          name: "Run macos test"
-          command: |
-             cd tests
-             ./test_macho.sh
+      #- run:
+      #    name: "Run macos test"
+      #    command: |
+      #       cd tests
+      #       ./test_macho.sh
 
-
+      - store_artifacts:
+          path: ./examples/rootfs/x8664_macos
+ 
 workflows:
   version: 2
   run-tests:
