@@ -71,7 +71,9 @@ jobs:
           unzip -Pinfected al-khaser.bin.zip
           unzip -Pinfected sality.dll.zip
           cd $GITHUB_WORKSPACE/tests
-          cmd.exe //C '.\test_pe.bat'
+          #cmd.exe //C '.\test_pe.bat'
+          ls -laR /c/hostedtoolcache/windows/Python/3.8.5/x64/lib/site-packages/qiling/os
+          python3 test_dos.py
 
 
     - name: linux run tests
