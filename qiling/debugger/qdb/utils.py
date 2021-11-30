@@ -3,14 +3,16 @@
 # Cross Platform and Multi Architecture Advanced Binary Emulation Framework
 #
 
+from __future__ import annotations
+from typing import Callable, Optional, Mapping
 from functools import partial
 
 from qiling.const import *
 
-CODE_END = True 
+CODE_END = True
 
 
-def dump_regs(ql):
+def dump_regs(ql: Qiling) -> Mapping[str, int]:
 
     if ql.archtype == QL_ARCH.MIPS:
 
@@ -34,10 +36,21 @@ def dump_regs(ql):
                 "r12", "sp", "lr", "pc",
                 )
 
+    elif ql.archtype == QL_ARCH.CORTEX_M:
+
+        _reg_order = (
+                "r0", "r1", "r2", "r3",
+                "r4", "r5", "r6", "r7",
+                "r8", "r9", "r10", "r11",
+                "r12", "sp", "lr", "pc",
+                "xpsr", "control", "primask", "basepri", "faultmask"
+                )
+
     return {reg_name: getattr(ql.reg, reg_name) for reg_name in _reg_order}
 
 
-def get_arm_flags(bits):
+def get_arm_flags(bits: int) -> Mapping[str, int]:
+
     def _get_mode(bits):
         return {
                 0b10000: "User",
@@ -63,36 +76,43 @@ def get_arm_flags(bits):
             }
 
 
-# parse unsigned integer from string 
-def parse_int(s):
-    return int(s, 16) if s.startswith("0x") else int(s)
+# parse unsigned integer from string
+def _parse_int(s: str) -> int:
+    return int(s, 0)
 
+
+# function dectorator for parse argument as integer
+def parse_int(func: Callable) -> Callable:
+    def wrap(qdb, s: str) -> int:
+        assert type(s) is str
+        try:
+            ret = _parse_int(s)
+        except:
+            ret = None
+        return func(qdb, ret)
+    return wrap
 
 # check wether negative value or not
-def is_negative(i):
+def is_negative(i: int) -> int:
     return i & (1 << 31)
 
 
 # convert valu to signed
-def signed_val(i):
-    val = i
-
-    if is_negative(val):
-        val -= 1 << 32
-
-    return val
+def signed_val(val: int) -> int:
+    return (val-1 << 32) if is_negative(val) else val
 
 
 # handle braches and jumps so we can set berakpoint properly
-def handle_bnj(ql, cur_addr):
+def handle_bnj(ql: Qiling, cur_addr: str) -> Callable[[Qiling, str], int]:
     return {
             QL_ARCH.MIPS     : handle_bnj_mips,
             QL_ARCH.ARM      : handle_bnj_arm,
             QL_ARCH.ARM_THUMB: handle_bnj_arm,
+            QL_ARCH.CORTEX_M : handle_bnj_arm,
             }.get(ql.archtype)(ql, cur_addr)
 
 
-def get_cpsr(bits):
+def get_cpsr(bits: int) -> (bool, bool, bool, bool):
     return (
             bits & 0x10000000 != 0, # V, overflow flag
             bits & 0x20000000 != 0, # C, carry flag
@@ -101,47 +121,53 @@ def get_cpsr(bits):
             )
 
 
-def is_thumb(bits):
+def is_thumb(bits: int) -> bool:
     return bits & 0x00000020 != 0
 
 
-def disasm(ql, address):
-    md = ql.create_disassembler()
-    return next(md.disasm(_read_inst(ql, address), address))
+def disasm(ql: Qiling, address: int, detail: bool = False) -> Optional[int]:
+
+    md = ql.disassembler
+    md.detail = detail
+    try:
+        ret = next(md.disasm(_read_inst(ql, address), address))
+
+    except StopIteration:
+        ret = None
+
+    return ret
 
 
-def _read_inst(ql, addr):
+def _read_inst(ql: Qiling, addr: int) -> int:
 
-    if ql.archtype in (QL_ARCH.ARM, QL_ARCH.ARM_THUMB):
-        result = ql.mem.read(addr, 4) # default option for arm instruction
+    result = ql.mem.read(addr, 4)
+
+    if ql.archtype in (QL_ARCH.ARM, QL_ARCH.ARM_THUMB, QL_ARCH.CORTEX_M):
         if is_thumb(ql.reg.cpsr):
 
             first_two = ql.unpack16(ql.mem.read(addr, 2))
             result = ql.pack16(first_two)
 
+            # to judge whether it's thumb mode or not
             if any([
                 first_two & 0xf000 == 0xf000,
                 first_two & 0xf800 == 0xf800,
                 first_two & 0xe800 == 0xe800,
-                ]):
+                 ]):
 
                 latter_two = ql.unpack16(ql.mem.read(addr+2, 2))
                 result += ql.pack16(latter_two)
 
-    elif ql.archtype == QL_ARCH.MIPS:
-        result = ql.mem.read(addr, 4)
-
     return result
 
 
-def handle_bnj_arm(ql, cur_addr):
+def handle_bnj_arm(ql: Qiling, cur_addr: str) -> int:
 
     def _read_reg_val(regs, _reg):
-        return getattr(ql.reg, _reg.replace("ip", "r12"))
+        return getattr(ql.reg, _reg.replace("ip", "r12").replace("fp", "r11"))
 
     def regdst_eq_pc(op_str):
         return op_str.partition(", ")[0] == "pc"
-
 
     read_inst = partial(_read_inst, ql)
     read_reg_val = partial(_read_reg_val, ql.reg)
@@ -235,7 +261,7 @@ def handle_bnj_arm(ql, cur_addr):
 
     if to_jump:
         if '#' in line.op_str:
-            ret_addr = parse_int(line.op_str.split('#')[-1])
+            ret_addr = _parse_int(line.op_str.split('#')[-1])
         else:
             ret_addr = read_reg_val(line.op_str)
 
@@ -259,7 +285,7 @@ def handle_bnj_arm(ql, cur_addr):
                 "le": lambda V, C, Z, N: (Z == 1 or N != V),
                 "hi": lambda V, C, Z, N: (Z == 0 and C == 1),
                 }.get(line.op_str)(*get_cpsr(ql.reg.cpsr))
-        
+
         it_block_range = [each_char for each_char in line.mnemonic[1:]]
 
         next_addr = cur_addr + ARM_THUMB_INST_SIZE
@@ -283,7 +309,7 @@ def handle_bnj_arm(ql, cur_addr):
 
             if "]" in rn_offset.split(", ")[1]: # pre-indexed immediate
                 _, r, imm = line.op_str.replace("[", "").replace("]", "").replace("!", "").replace("#", "").split(", ")
-                ret_addr = ql.unpack32(ql.mem.read(parse_int(imm) + read_reg_val(r), 4))
+                ret_addr = ql.unpack32(ql.mem.read(_parse_int(imm) + read_reg_val(r), 4))
 
             else: # post-indexed immediate
                 # FIXME: weired behavior, immediate here does not apply
@@ -338,7 +364,7 @@ def handle_bnj_arm(ql, cur_addr):
 
     elif line.mnemonic == "sub" and regdst_eq_pc(line.op_str):
         _, r, imm = line.op_str.split(", ")
-        ret_addr = read_reg_val(r) - parse_int(imm.strip("#"))
+        ret_addr = read_reg_val(r) - _parse_int(imm.strip("#"))
 
     elif line.mnemonic == "mov" and regdst_eq_pc(line.op_str):
         _, r = line.op_str.split(", ")
@@ -347,10 +373,10 @@ def handle_bnj_arm(ql, cur_addr):
     if ret_addr & 1:
         ret_addr -= 1
 
-    return ret_addr
+    return (to_jump, ret_addr)
 
 
-def handle_bnj_mips(ql, cur_addr):
+def handle_bnj_mips(ql: Qiling, cur_addr: str) -> int:
     MIPS_INST_SIZE = 4
 
     def _read_reg(regs, _reg):
@@ -360,12 +386,14 @@ def handle_bnj_mips(ql, cur_addr):
 
     line = disasm(ql, cur_addr)
 
+    if line.mnemonic == "break": # indicates program extied
+        return CODE_END
+
     # default breakpoint address if no jumps and branches here
     ret_addr = cur_addr + MIPS_INST_SIZE
 
+    to_jump = False
     if line.mnemonic.startswith('j') or line.mnemonic.startswith('b'):
-        if line.mnemonic == "break": # indicates program extied
-            return CODE_END
 
         # make sure at least delay slot executed
         ret_addr += MIPS_INST_SIZE
@@ -373,7 +401,7 @@ def handle_bnj_mips(ql, cur_addr):
         # get registers or memory address from op_str
         targets = [
                 read_reg_val(each)
-                if '$' in each else parse_int(each)
+                if '$' in each else _parse_int(each)
                 for each in line.op_str.split(", ")
                 ]
 
@@ -405,8 +433,23 @@ def handle_bnj_mips(ql, cur_addr):
             # target address is always the rightmost one
             ret_addr = targets[-1]
 
-    return ret_addr
+    return (to_jump, ret_addr)
 
+class Breakpoint(object):
+    """
+    dummy class for breakpoint
+    """
+    def __init__(self, address: int):
+        self.addr = address
+        self.hitted = False
+        self.hook = None
+
+class TempBreakpoint(Breakpoint):
+    """
+    dummy class for temporay breakpoint
+    """
+    def __init__(self, address):
+        super().__init__(address)
 
 
 if __name__ == "__main__":

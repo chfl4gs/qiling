@@ -4,6 +4,7 @@
 #
 
 from unicorn.arm_const import *
+from enum import IntEnum
 
 reg_map = {
             "r0": UC_ARM_REG_R0,
@@ -22,6 +23,7 @@ reg_map = {
             "sp": UC_ARM_REG_SP, 
             "lr": UC_ARM_REG_LR,
             "pc": UC_ARM_REG_PC,
+            
             # CPSR needs to be at offset 25 for GDB, see https://sourceware.org/git/?p=binutils-gdb.git;a=blob;f=gdb/arch/arm.h;h=fa589fd0582c0add627a068e6f4947a909c45e86;hb=HEAD#l34
             # The fp registers inbetween have become obsolete
             "f0": UC_ARM_REG_INVALID,

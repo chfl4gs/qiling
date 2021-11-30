@@ -10,9 +10,10 @@ from unicorn.arm64_const import UC_ARM64_REG_X8, UC_ARM64_REG_X16
 from unicorn.arm_const import UC_ARM_REG_R7
 from unicorn.mips_const import UC_MIPS_REG_V0
 from unicorn.x86_const import UC_X86_REG_EAX, UC_X86_REG_RAX
+from unicorn.riscv_const import UC_RISCV_REG_A7
 
 from qiling import Qiling
-from qiling.cc import QlCC, intel, arm, mips
+from qiling.cc import QlCC, intel, arm, mips, riscv
 from qiling.const import QL_ARCH, QL_OS, QL_INTERCEPT
 from qiling.exception import QlErrorSyscallNotFound
 from qiling.os.os import QlOs
@@ -51,6 +52,12 @@ class mipso32(mips.mipso32):
         self.ql.reg.v0 = value
         self.ql.reg.a3 = a3return
 
+class riscv32(riscv.riscv):
+    pass
+
+class riscv64(riscv.riscv):
+    pass
+
 class QlOsPosix(QlOs):
 
     def __init__(self, ql: Qiling):
@@ -59,12 +66,8 @@ class QlOsPosix(QlOs):
         self.ql = ql
         self.sigaction_act = [0] * 256
 
-        if self.ql.root:
-            self.uid = 0
-            self.gid = 0
-        else:
-            self.uid = self.profile.getint("KERNEL","uid")
-            self.gid = self.profile.getint("KERNEL","gid")
+        self.uid = self.euid = self.profile.getint("KERNEL","uid")
+        self.gid = self.egid = self.profile.getint("KERNEL","gid")
 
         self.pid = self.profile.getint("KERNEL", "pid")
         self.ipv6 = self.profile.getboolean("NETWORK", "ipv6")
@@ -81,7 +84,9 @@ class QlOsPosix(QlOs):
             QL_ARCH.ARM  : UC_ARM_REG_R7,
             QL_ARCH.MIPS : UC_MIPS_REG_V0,
             QL_ARCH.X86  : UC_X86_REG_EAX,
-            QL_ARCH.X8664: UC_X86_REG_RAX
+            QL_ARCH.X8664: UC_X86_REG_RAX,
+            QL_ARCH.RISCV: UC_RISCV_REG_A7,
+            QL_ARCH.RISCV64: UC_RISCV_REG_A7,            
         }[self.ql.archtype]
 
         # handle a special case
@@ -96,7 +101,9 @@ class QlOsPosix(QlOs):
             QL_ARCH.ARM  : aarch32,
             QL_ARCH.MIPS : mipso32,
             QL_ARCH.X86  : intel32,
-            QL_ARCH.X8664: intel64
+            QL_ARCH.X8664: intel64,
+            QL_ARCH.RISCV: riscv32,
+            QL_ARCH.RISCV64: riscv64,
         }[self.ql.archtype](ql)
 
         self._fd = QlFileDes([0] * NR_OPEN)
@@ -125,6 +132,15 @@ class QlOsPosix(QlOs):
         self._stderr = stream
         self._fd[2] = stream
 
+    @QlOs.root.getter
+    def root(self) -> bool:
+        return (self.euid == 0) and (self.egid == 0)
+
+    @QlOs.root.setter
+    def root(self, enabled: bool) -> None:
+        self.euid = 0 if enabled else self.uid
+        self.egid = 0 if enabled else self.gid
+
     @property
     def syscall(self):
         return self.get_syscall()
@@ -138,10 +154,6 @@ class QlOsPosix(QlOs):
             intercept = QL_INTERCEPT.CALL
 
         self.posix_syscall_hooks[intercept][target] = handler
-
-        # if intercept == QL_INTERCEPT.CALL:
-        #     if self.ql.ostype in (QL_OS.WINDOWS, QL_OS.UEFI):
-        #         self.set_api(target_syscall, intercept_function)
 
     @staticmethod
     def getNameFromErrorCode(ret: int) -> str:
@@ -183,6 +195,7 @@ class QlOsPosix(QlOs):
 
             # look in os-specific and posix syscall hooks
             if syscall_name:
+                self.ql.log.debug("syscall hooked 0x%x: %s()" % (self.ql.reg.arch_pc, syscall_name))
                 syscall_hook = getattr(os_syscalls, syscall_name, None) or getattr(posix_syscalls, syscall_name, None)
 
         if syscall_hook:
@@ -227,7 +240,8 @@ class QlOsPosix(QlOs):
                 raise e
 
             # print out log entry
-            syscall_basename = syscall_name[len(SYSCALL_PREF):]
+            syscall_basename = syscall_name[len(SYSCALL_PREF) if syscall_name.startswith(SYSCALL_PREF) else 0:] 
+
             args = []
 
             for name, value in zip(param_names, params):
@@ -237,7 +251,7 @@ class QlOsPosix(QlOs):
 
                 args.append((name, f'{value:#x}'))
 
-            sret = retval and QlOsPosix.getNameFromErrorCode(retval)
+            sret = QlOsPosix.getNameFromErrorCode(retval)
             self.utils.print_function(self.ql.reg.arch_pc, syscall_basename, args, sret, False)
 
             # record syscall statistics
