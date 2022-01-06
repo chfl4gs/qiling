@@ -93,9 +93,7 @@ class QlLoaderMCU(QlLoader):
         if self.filetype == 'elf':
             for segment in self.elf.iter_segments():
                 if segment['p_type'] == 'PT_LOAD':
-                    for section in self.elf.iter_sections():
-                        if segment.section_in_segment(section):
-                            self.ql.mem.write(section.header['sh_addr'], section.data())
+                    self.ql.mem.write(segment['p_paddr'], segment.data())
 
             # TODO: load symbol table
 
@@ -121,9 +119,12 @@ class QlLoaderMCU(QlLoader):
                 size = args['size']
                 base = args['base']
                 self.ql.mem.map(base, size, info=f'[{name}]')
-                
-                if name == 'FLASH':
-                    self.ql.hw.setup_remap(0, base, size, info=f'[CODE]')
+            
+            if memtype == 'remap':
+                size = args['size']
+                base = args['base']
+                alias = args['alias']
+                self.ql.hw.setup_remap(alias, base, size, info=f'[{name}]')
 
             if memtype == 'bitband':
                 size = args['size'] * 32

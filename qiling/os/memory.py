@@ -128,6 +128,28 @@ class QlMemoryManager:
 
         self.map_info = tmp_map_info
 
+    def change_mapinfo(self, mem_s: int, mem_e: int, mem_p: int = None, mem_info: str = None):
+        tmp_map_info: MapInfoEntry = None
+        info_idx: int = None
+
+        for idx, map_info in enumerate(self.map_info):
+            if mem_s >= map_info[0] and mem_e <= map_info[1]:
+                tmp_map_info = map_info
+                info_idx = idx
+                break
+
+        if tmp_map_info is None:
+            self.ql.log.error(f'Cannot change mapinfo at {mem_s:#08x}-{mem_e:#08x}')
+            return
+
+        if mem_p is not None:
+            self.del_mapinfo(mem_s, mem_e)
+            self.add_mapinfo(mem_s, mem_e, mem_p, mem_info if mem_info else tmp_map_info[3])
+            return
+
+        if mem_info is not None:
+            self.map_info[info_idx] = (tmp_map_info[0], tmp_map_info[1], tmp_map_info[2], mem_info, tmp_map_info[4])
+
     def get_mapinfo(self) -> Sequence[Tuple[int, int, str, str, Optional[str]]]:
         """Get memory map info.
 
@@ -173,21 +195,45 @@ class QlMemoryManager:
     def get_lib_base(self, filename: str) -> int:
         return next((s for s, _, _, info, _ in self.map_info if os.path.split(info)[1] == filename), -1)
 
-    def align(self, addr: int, alignment: int = None) -> int:
-        """Round up to nearest alignment.
+    def align(self, value: int, alignment: int = None) -> int:
+        """Align a value down to the specified alignment boundary.
 
         Args:
-            addr: address to align
-            alignment: alignment granularity, must be a power of 2
+            value: a value to align
+            alignment: alignment boundary; must be a power of 2. if not specified
+            value will be aligned to page size
+
+        Returns: aligned value
         """
 
         if alignment is None:
             alignment = self.pagesize
 
-        # rounds up to nearest alignment
-        mask = self.max_mem_addr & -alignment
+        # make sure alignment is a power of 2
+        assert alignment & (alignment - 1) == 0
 
-        return (addr + (alignment - 1)) & mask
+        # round down to nearest alignment
+        return value & ~(alignment - 1)
+
+    def align_up(self, value: int, alignment: int = None) -> int:
+        """Align a value up to the specified alignment boundary.
+
+        Args:
+            value: value to align
+            alignment: alignment boundary; must be a power of 2. if not specified
+            value will be aligned to page size
+
+        Returns: aligned value
+        """
+
+        if alignment is None:
+            alignment = self.pagesize
+
+        # make sure alignment is a power of 2
+        assert alignment & (alignment - 1) == 0
+
+        # round up to nearest alignment
+        return (value + alignment - 1) & ~(alignment - 1)
 
     def save(self):
         """Save entire memory content.
@@ -409,7 +455,7 @@ class QlMemoryManager:
         gaps = zip(gaps_lbounds, gaps_ubounds)
 
         for lbound, ubound in gaps:
-            addr = self.align(lbound, align)
+            addr = self.align_up(lbound, align)
             end = addr + size
 
             # is aligned range within gap and satisfying min / max requirements?
@@ -435,9 +481,10 @@ class QlMemoryManager:
         if align is None:
             align = self.pagesize
 
+        size = self.align_up(size)
         addr = self.find_free_space(size, minaddr, maxaddr, align)
 
-        self.map(addr, self.align(size), perms, info)
+        self.map(addr, size, perms, info)
 
         return addr
 
@@ -445,10 +492,11 @@ class QlMemoryManager:
         # mask off perms bits that are not supported by unicorn
         perms &= UC_PROT_ALL
 
-        aligned_address = addr & ~(self.pagesize - 1)
-        aligned_size = self.align((addr & (self.pagesize - 1)) + size)
+        aligned_address = self.align(addr)
+        aligned_size = self.align_up((addr & (self.pagesize - 1)) + size)
 
         self.ql.uc.mem_protect(aligned_address, aligned_size, perms)
+        self.change_mapinfo(aligned_address, aligned_address + aligned_size, mem_p = perms)
 
 
     def map(self, addr: int, size: int, perms: int = UC_PROT_ALL, info: str = None):
@@ -502,29 +550,30 @@ class QlMemoryManager:
         self.mmio_cbs[(addr, addr + size)] = (read_cb, write_cb)
 
 # A Simple Heap Implementation
-class Chunk():
+class Chunk:
     def __init__(self, address: int, size: int):
         self.inuse = True
         self.address = address
         self.size = size
 
-    @staticmethod
-    def compare(chunk):
-        return chunk.size
-
 class QlMemoryHeap:
     def __init__(self, ql: Qiling, start_address: int, end_address: int):
         self.ql = ql
         self.chunks: List[Chunk] = []
+
+        # heap boundaries
         self.start_address = start_address
         self.end_address = end_address
-        # unicorn needs 0x1000
-        self.page_size = 0x1000
-        # current alloced memory size
+
+        # size of consecutive memory currently allocated for heap use
+        # invariant: current_alloc is aligned to memory page size
         self.current_alloc = 0
-        # curent use memory size
+
+        # size of consecutive memory currently used for chunks
+        # invariant: current_use never exceeds current_alloc
         self.current_use = 0
-        # save all memory regions allocated
+
+        # keep track of all memory regions allocated for heap use
         self.mem_alloc = []
 
     def save(self) -> Mapping[str, Any]:
@@ -532,7 +581,6 @@ class QlMemoryHeap:
             'chunks'        : self.chunks,
             'start_address' : self.start_address,
             'end_address'   : self.end_address,
-            'page_size'     : self.page_size,
             'current_alloc' : self.current_alloc,
             'current_use'   : self.current_use,
             'mem_alloc'     : self.mem_alloc
@@ -544,39 +592,44 @@ class QlMemoryHeap:
         self.chunks         = saved_state['chunks']
         self.start_address  = saved_state['start_address']
         self.end_address    = saved_state['end_address']
-        self.page_size      = saved_state['page_size']
         self.current_alloc  = saved_state['current_alloc']
         self.current_use    = saved_state['current_use']
         self.mem_alloc      = saved_state['mem_alloc']
 
-    def alloc(self, size: int):
-        # Find the heap chunks that best matches size 
-        self.chunks.sort(key=Chunk.compare)
-        for chunk in self.chunks:
-            if chunk.inuse is False and chunk.size > size:
-                chunk.inuse = True
-                return chunk.address
+    def alloc(self, size: int) -> int:
+        """Allocate heap memory.
 
-        chunk = None
-        # If we need mem_map new memory
-        if self.current_use + size > self.current_alloc:
-            real_size = self.ql.mem.align(size, self.page_size)
-            # If the heap is not enough
-            if self.start_address + self.current_use + real_size > self.end_address:
-                return 0
-            self.ql.mem.map(self.start_address + self.current_alloc, real_size, info="[heap]")
-            chunk = Chunk(self.start_address + self.current_use, size)
-            self.mem_alloc.append((self.start_address + self.current_alloc, real_size))
-            self.current_alloc += real_size
-            self.current_use += size
-            self.chunks.append(chunk)
-        else:
+        Args:
+            size: requested allocation size in bytes
+
+        Returns:
+            The address of the newly allocated memory chunk, or 0 if allocation has failed
+        """
+
+        # attempt to recycle an existing unused chunk first.
+        # locate the smallest available chunk that has enough room
+        chunk = min((chunk for chunk in self.chunks if (not chunk.inuse) and (chunk.size >= size)), default=None, key=lambda ch: ch.size)
+
+        # if could not find any, create a new one
+        if chunk is None:
+            # is new chunk going to exceed currently allocated heap space?
+            # in case it does, allocate additional heap space
+            if self.current_use + size > self.current_alloc:
+                real_size = self.ql.mem.align_up(size)
+
+                # if that additional allocation is going to exceed heap upper bound, fail
+                if self.start_address + self.current_use + real_size > self.end_address:
+                    return 0
+
+                self.ql.mem.map(self.start_address + self.current_alloc, real_size, info="[heap]")
+                self.mem_alloc.append((self.start_address + self.current_alloc, real_size))
+                self.current_alloc += real_size
+
             chunk = Chunk(self.start_address + self.current_use, size)
             self.current_use += size
             self.chunks.append(chunk)
 
         chunk.inuse = True
-        #ql.log.debug("heap.alloc addresss: " + hex(chunk.address))
         return chunk.address
 
     def size(self, addr: int) -> int:

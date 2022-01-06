@@ -38,13 +38,13 @@ class GD32VF1xxGpio(QlPeripheral, GpioHooks):
             LOCK  =  0x00000000,
         )
 
-    @QlPeripheral.debug_info()
+    @QlPeripheral.monitor()
     def read(self, offset: int, size: int) -> int:		
         buf = ctypes.create_string_buffer(size)
         ctypes.memmove(buf, ctypes.addressof(self.gpio) + offset, size)
         return int.from_bytes(buf.raw, byteorder='little')
     
-    @QlPeripheral.debug_info()
+    @QlPeripheral.monitor()
     def write(self, offset: int, size: int, value: int):
         if offset == self.struct.OCTL.offset: 
             for i in range(16):
@@ -77,13 +77,13 @@ class GD32VF1xxGpio(QlPeripheral, GpioHooks):
         self.ql.log.debug(f'[{self.label}] Set P{self.label[-1].upper()}{i}')
         
         self.gpio.OCTL |= 1 << i        
-        self.hook_set_func[i]()
+        self.call_hook_set(i)
     
     def reset_pin(self, i):
         self.ql.log.debug(f'[{self.label}] Reset P{self.label[-1].upper()}{i}')
         
         self.gpio.OCTL &= ~(1 << i)
-        self.hook_reset_func[i]()
+        self.call_hook_reset(i)
         
     def pin(self, index):
         return (self.gpio.OCTL >> index) & 1
