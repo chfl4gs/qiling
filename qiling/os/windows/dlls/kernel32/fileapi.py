@@ -171,12 +171,12 @@ def hook_ReadFile(ql: Qiling, address: int, params):
             read_len = nNumberOfBytesToRead
 
         ql.mem.write(lpBuffer, s)
-        ql.mem.write(lpNumberOfBytesRead, ql.pack(read_len))
+        ql.mem.write_ptr(lpNumberOfBytesRead, read_len, 4)
     else:
         f = ql.os.handle_manager.get(hFile).obj
         data = f.read(nNumberOfBytesToRead)
         ql.mem.write(lpBuffer, data)
-        ql.mem.write(lpNumberOfBytesRead, ql.pack32(lpNumberOfBytesRead))
+        ql.mem.write_ptr(lpNumberOfBytesRead, len(data), 4)
 
     return 1
 
@@ -203,8 +203,8 @@ def hook_WriteFile(ql: Qiling, address: int, params):
     if hFile == STD_OUTPUT_HANDLE:
         s = ql.mem.read(lpBuffer, nNumberOfBytesToWrite)
         ql.os.stdout.write(s)
-        ql.os.utils.string_appearance(s.decode())
-        ql.mem.write(lpNumberOfBytesWritten, ql.pack(nNumberOfBytesToWrite))
+        ql.os.stats.log_string(s.decode())
+        ql.mem.write_ptr(lpNumberOfBytesWritten, nNumberOfBytesToWrite, 4)
     else:
         f = ql.os.handle_manager.get(hFile)
 
@@ -216,8 +216,8 @@ def hook_WriteFile(ql: Qiling, address: int, params):
             f = f.obj
 
         buffer = ql.mem.read(lpBuffer, nNumberOfBytesToWrite)
-        f.write(bytes(buffer))
-        ql.mem.write(lpNumberOfBytesWritten, ql.pack32(nNumberOfBytesToWrite))
+        nNumberOfBytesWritten = f.write(bytes(buffer))
+        ql.mem.write_ptr(lpNumberOfBytesWritten, nNumberOfBytesWritten, 4)
 
     return 1
 
@@ -235,7 +235,7 @@ def _CreateFile(ql: Qiling, address: int, params):
     if dwDesiredAccess & GENERIC_WRITE:
         mode += "wb"
     else:
-        mode += "r"
+        mode += "rb"
 
     try:
         f = ql.os.fs_mapper.open(s_lpFileName, mode)
@@ -402,7 +402,7 @@ def hook_GetVolumeInformationW(ql: Qiling, address: int, params):
 
     lpMaximumComponentLength = params["lpMaximumComponentLength"]
     if lpMaximumComponentLength != 0:
-        ql.mem.write(lpMaximumComponentLength, ql.pack16(255))
+        ql.mem.write_ptr(lpMaximumComponentLength, 255, 2)
 
     pt_serial_number = params["lpVolumeSerialNumber"]
     if pt_serial_number != 0:
@@ -415,7 +415,7 @@ def hook_GetVolumeInformationW(ql: Qiling, address: int, params):
 
     if pt_flag != 0:
         # TODO implement
-        ql.mem.write(pt_flag, ql.pack32(0x00020000))
+        ql.mem.write_ptr(pt_flag, 0x00020000, 4)
 
     if pt_system_type != 0:
         system_type = (ql.os.profile["VOLUME"]["type"] + "\x00").encode("utf-16le")
@@ -663,3 +663,47 @@ def hook_SetFileAttributesA(ql: Qiling, address: int, params):
 })
 def hook_SetFileAttributesW(ql: Qiling, address: int, params):
     return 1
+
+# BOOL AreFileApisANSI();
+@winsdkapi(cc=STDCALL, params={})
+def hook_AreFileApisANSI(ql: Qiling, address: int, params):
+    # TODO make this coherent with SetFileApisToANSI/OEM calls
+    return 1
+
+# void SetFileApisToANSI();
+@winsdkapi(cc=STDCALL, params={})
+def hook_SetFileApisToANSI(ql: Qiling, address: int, params):
+    pass
+
+# void SetFileApisToOEM();
+@winsdkapi(cc=STDCALL, params={})
+def hook_SetFileApisToOEM(ql: Qiling, address: int, params):
+    pass
+
+# BOOL DeleteFileA(
+#   LPCSTR lpFileName
+# );
+@winsdkapi(cc=STDCALL, params={
+    'lpFileName' : LPCSTR
+})
+def hook_DeleteFileA(ql: Qiling, address: int, params):
+    lpFileName = ql.os.path.transform_to_real_path(params["lpFileName"])
+    try:
+        os.remove(lpFileName)
+        return 1
+    except:
+        return 0
+
+# BOOL DeleteFileW(
+#   LPCWSTR lpFileName
+# );
+@winsdkapi(cc=STDCALL, params={
+    'lpFileName' : LPCWSTR
+})
+def hook_DeleteFileW(ql: Qiling, address: int, params):
+    lpFileName = ql.os.path.transform_to_real_path(params["lpFileName"])
+    try:
+        os.remove(lpFileName)
+        return 1
+    except:
+        return 0

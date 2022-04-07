@@ -22,7 +22,7 @@ def LocateHandles(context, params):
 	else:
 		handles = []
 
-	return len(handles) * context.ql.pointersize, handles
+	return len(handles) * context.ql.arch.pointersize, handles
 
 def InstallProtocolInterface(context, params):
 	handle = read_int64(context.ql, params["Handle"])
@@ -100,7 +100,7 @@ def LocateHandle(context, params):
 
 		for handle in handles:
 			write_int64(context.ql, ptr, handle)
-			ptr += context.ql.pointersize
+			ptr += context.ql.arch.pointersize
 
 		ret = EFI_SUCCESS
 
@@ -129,6 +129,6 @@ def InstallConfigurationTable(context, params):
 	if not guid:
 		return EFI_INVALID_PARAMETER
 
-	context.install_configuration_table(guid, table)
+	context.conftable.install(guid, table)
 
 	return EFI_SUCCESS

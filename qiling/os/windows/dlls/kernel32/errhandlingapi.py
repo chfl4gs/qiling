@@ -75,9 +75,7 @@ def hook_SetErrorMode(ql: Qiling, address: int, params):
 def hook_RaiseException(ql: Qiling, address: int, params):
     func_addr = ql.os.handle_manager.search("TopLevelExceptionHandler").obj
 
-    # TODO: this implementation won't work most of the time
-    size = find_size_function(ql, func_addr)
-    ql.os.exec_arbitrary(func_addr, func_addr + size)
+    ql.os.fcall.call_native(func_addr, [], None)
 
     return 0
 
@@ -99,9 +97,9 @@ def hook_AddVectoredExceptionHandler(ql: Qiling, address: int, params):
         # https://github.com/LordNoteworthy/al-khaser/wiki/Anti-Debugging-Tricks#interrupt-0x2d
         pointer = ql.os.heap.alloc(0x4)
         # the value has just to be different from 0x80000003
-        ql.mem.write(pointer, ql.pack32(0))
+        ql.mem.write_ptr(pointer, 0, 4)
         double_pointer = ql.os.heap.alloc(0x4)
-        ql.mem.write(double_pointer, ql.pack32(pointer))
+        ql.mem.write_ptr(double_pointer, pointer, 4)
 
         # arg
         ql.stack_push(double_pointer)
@@ -114,15 +112,14 @@ def hook_AddVectoredExceptionHandler(ql: Qiling, address: int, params):
         # FIXME: probably this works only with al-khaser.
         pointer = ql.os.heap.alloc(0x4)
         # the value has just to be different from 0x80000003
-        ql.mem.write(pointer, ql.pack32(0))
+        ql.mem.write_ptr(pointer, 0, 4)
         double_pointer = ql.os.heap.alloc(0x4)
-        ql.mem.write(double_pointer, ql.pack32(pointer))
+        ql.mem.write_ptr(double_pointer, pointer, 4)
 
-        ql.reg.eax = double_pointer
-        ql.reg.esi = user_data
+        ql.arch.regs.eax = double_pointer
+        ql.arch.regs.esi = user_data
 
     addr = params["Handler"]
-    #size = find_size_function(ql, addr)
 
     # the interrupts 0x2d, 0x3 must be hooked
     hook = ql.hook_intno(exec_standard_into, 0x3, user_data=addr)

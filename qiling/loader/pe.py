@@ -78,7 +78,8 @@ class Process():
             path = os.path.join(self.ql.rootfs, self.ql.dlls, dll_name)
 
         if not os.path.exists(path):
-            raise QlErrorFileNotFound("Cannot find dll in %s" % path)
+            self.ql.log.error("Cannot find dll in %s" % path)
+            return 0
 
         # If the dll is already loaded
         if dll_name in self.dlls:
@@ -209,19 +210,19 @@ class Process():
         if name == b"_acmdln":
             addr, packed_addr = self._alloc_cmdline(wide=False)
             cmdline_entry = {"name": name, "address": address}
-            memory[address:address + self.ql.pointersize] = packed_addr
+            memory[address:address + self.ql.arch.pointersize] = packed_addr
             self.ql.mem.write(addr, self.cmdline)
         elif name == b"_wcmdln":
             addr, packed_addr = self._alloc_cmdline(wide=True)
             cmdline_entry = {"name": name, "address": address}
-            memory[address:address + self.ql.pointersize] = packed_addr
+            memory[address:address + self.ql.arch.pointersize] = packed_addr
             encoded = self.cmdline.decode('ascii').encode('UTF-16LE')
             self.ql.mem.write(addr, encoded)
 
         return cmdline_entry
 
     def init_tib(self):
-        if self.ql.archtype == QL_ARCH.X86:
+        if self.ql.arch.type == QL_ARCH.X86:
             teb_addr = self.structure_last_addr
         else:
             gs = self.structure_last_addr
@@ -242,11 +243,11 @@ class Process():
         self.ql.mem.write(teb_addr, teb_data.bytes())
 
         self.structure_last_addr += teb_size
-        if self.ql.archtype == QL_ARCH.X8664:
+        if self.ql.arch.type == QL_ARCH.X8664:
             # TEB
-            self.ql.mem.write(gs + 0x30, self.ql.pack64(teb_addr))
+            self.ql.mem.write_ptr(gs + 0x30, teb_addr)
             # PEB
-            self.ql.mem.write(gs + 0x60, self.ql.pack64(teb_addr + teb_size))
+            self.ql.mem.write_ptr(gs + 0x60, teb_addr + teb_size)
 
         self.TEB = self.ql.TEB = teb_data
 
@@ -257,9 +258,13 @@ class Process():
 
         # we must set an heap, will try to retrieve this value. Is ok to be all \x00
         process_heap = self.ql.os.heap.alloc(0x100)
-        peb_data = PEB(self.ql, base=peb_addr, process_heap=process_heap,
-                       number_processors=self.ql.os.profile.getint("HARDWARE",
-                                                                   "number_processors"))
+        process_parameters = self.ql.os.heap.alloc(0x100)
+        peb_data = PEB(
+            self.ql,
+            base=peb_addr,
+            process_heap=process_heap,
+            process_parameters=process_parameters,
+            number_processors=self.ql.os.profile.getint("HARDWARE", "number_processors"))
         peb_data.LdrAddress = peb_addr + peb_data.size
         peb_data.write(peb_addr)
         self.structure_last_addr += peb_data.size
@@ -272,16 +277,16 @@ class Process():
             self.ql,
             base=ldr_addr,
             in_load_order_module_list={
-                'Flink': ldr_addr + 2 * self.ql.pointersize,
-                'Blink': ldr_addr + 2 * self.ql.pointersize
+                'Flink': ldr_addr + 2 * self.ql.arch.pointersize,
+                'Blink': ldr_addr + 2 * self.ql.arch.pointersize
             },
             in_memory_order_module_list={
-                'Flink': ldr_addr + 4 * self.ql.pointersize,
-                'Blink': ldr_addr + 4 * self.ql.pointersize
+                'Flink': ldr_addr + 4 * self.ql.arch.pointersize,
+                'Blink': ldr_addr + 4 * self.ql.arch.pointersize
             },
             in_initialization_order_module_list={
-                'Flink': ldr_addr + 6 * self.ql.pointersize,
-                'Blink': ldr_addr + 6 * self.ql.pointersize
+                'Flink': ldr_addr + 6 * self.ql.arch.pointersize,
+                'Blink': ldr_addr + 6 * self.ql.arch.pointersize
             }
         )
         self.ql.mem.write(ldr_addr, ldr_data.bytes())
@@ -311,8 +316,8 @@ class Process():
             ldr_table_entry.InInitializationOrderLinks['Flink'] = flink.InInitializationOrderModuleList['Flink']
 
             flink.InLoadOrderModuleList['Flink'] = ldr_table_entry.base
-            flink.InMemoryOrderModuleList['Flink'] = ldr_table_entry.base + 2 * self.ql.pointersize
-            flink.InInitializationOrderModuleList['Flink'] = ldr_table_entry.base + 4 * self.ql.pointersize
+            flink.InMemoryOrderModuleList['Flink'] = ldr_table_entry.base + 2 * self.ql.arch.pointersize
+            flink.InInitializationOrderModuleList['Flink'] = ldr_table_entry.base + 4 * self.ql.arch.pointersize
 
         else:
             flink = self.ldr_list[-1]
@@ -321,8 +326,8 @@ class Process():
             ldr_table_entry.InInitializationOrderLinks['Flink'] = flink.InInitializationOrderLinks['Flink']
 
             flink.InLoadOrderLinks['Flink'] = ldr_table_entry.base
-            flink.InMemoryOrderLinks['Flink'] = ldr_table_entry.base + 2 * self.ql.pointersize
-            flink.InInitializationOrderLinks['Flink'] = ldr_table_entry.base + 4 * self.ql.pointersize
+            flink.InMemoryOrderLinks['Flink'] = ldr_table_entry.base + 2 * self.ql.arch.pointersize
+            flink.InInitializationOrderLinks['Flink'] = ldr_table_entry.base + 4 * self.ql.arch.pointersize
 
         # Blink
         blink = self.LDR
@@ -331,8 +336,8 @@ class Process():
         ldr_table_entry.InInitializationOrderLinks['Blink'] = blink.InInitializationOrderModuleList['Blink']
 
         blink.InLoadOrderModuleList['Blink'] = ldr_table_entry.base
-        blink.InMemoryOrderModuleList['Blink'] = ldr_table_entry.base + 2 * self.ql.pointersize
-        blink.InInitializationOrderModuleList['Blink'] = ldr_table_entry.base + 4 * self.ql.pointersize
+        blink.InMemoryOrderModuleList['Blink'] = ldr_table_entry.base + 2 * self.ql.arch.pointersize
+        blink.InInitializationOrderModuleList['Blink'] = ldr_table_entry.base + 4 * self.ql.arch.pointersize
 
         self.ql.mem.write(flink.base, flink.bytes())
         self.ql.mem.write(blink.base, blink.bytes())
@@ -365,9 +370,9 @@ class Process():
         driver_object_addr = self.structure_last_addr
         self.ql.log.info("Driver object addr is 0x%x" %driver_object_addr)
 
-        if self.ql.archtype == QL_ARCH.X86:
+        if self.ql.arch.type == QL_ARCH.X86:
             self.driver_object = DRIVER_OBJECT32(self.ql, driver_object_addr)
-        elif self.ql.archtype == QL_ARCH.X8664:
+        elif self.ql.arch.type == QL_ARCH.X8664:
             self.driver_object = DRIVER_OBJECT64(self.ql, driver_object_addr)
 
         driver_object_size = ctypes.sizeof(self.driver_object)
@@ -381,9 +386,9 @@ class Process():
         regitry_path_addr = self.structure_last_addr
         self.ql.log.info("Registry path addr is 0x%x" %regitry_path_addr)
 
-        if self.ql.archtype == QL_ARCH.X86:
+        if self.ql.arch.type == QL_ARCH.X86:
             regitry_path_data = UNICODE_STRING32(0, 0, regitry_path_addr)
-        elif self.ql.archtype == QL_ARCH.X8664:
+        elif self.ql.arch.type == QL_ARCH.X8664:
             regitry_path_data = UNICODE_STRING64(0, 0, regitry_path_addr)
 
         regitry_path_size = ctypes.sizeof(regitry_path_data)
@@ -397,9 +402,9 @@ class Process():
         self.ql.log.info("EPROCESS is is 0x%x" %addr)
 
 
-        if self.ql.archtype == QL_ARCH.X86:
+        if self.ql.arch.type == QL_ARCH.X86:
             self.eprocess_object = EPROCESS32(self.ql, addr)
-        elif self.ql.archtype == QL_ARCH.X8664:
+        elif self.ql.arch.type == QL_ARCH.X8664:
             self.eprocess_object = EPROCESS64(self.ql, addr)            
 
         size = ctypes.sizeof(self.eprocess_object)
@@ -415,9 +420,9 @@ class Process():
 		struct information:
 		https://doxygen.reactos.org/d8/dae/modules_2rostests_2winetests_2ntdll_2time_8c_source.html
         '''
-        if self.ql.archtype == QL_ARCH.X86:
+        if self.ql.arch.type == QL_ARCH.X86:
             KI_USER_SHARED_DATA = 0xFFDF0000
-        elif self.ql.archtype == QL_ARCH.X8664:
+        elif self.ql.arch.type == QL_ARCH.X8664:
             KI_USER_SHARED_DATA = 0xFFFFF78000000000
 
         self.ql.log.info("KI_USER_SHARED_DATA is 0x%x" %KI_USER_SHARED_DATA)
@@ -430,17 +435,13 @@ class Process():
 
 
 class QlLoaderPE(QlLoader, Process):
-    def __init__(self, ql: Qiling):
+    def __init__(self, ql: Qiling, libcache: bool):
         super().__init__(ql)
 
         self.ql         = ql
         self.path       = self.ql.path
         self.is_driver  = False
-
-        if ql.libcache is True:
-            self.libcache = QlPeCache()
-        else:
-            self.libcache = ql.libcache or None
+        self.libcache   = QlPeCache() if libcache else None
 
     def run(self):
         self.init_dlls = [b"ntdll.dll", b"kernel32.dll", b"user32.dll"]
@@ -455,25 +456,21 @@ class QlLoaderPE(QlLoader, Process):
                 self.init_dlls.append(b"ntoskrnl.exe")
                 self.sys_dlls.append(b"ntoskrnl.exe")
             
-        if self.ql.archtype == QL_ARCH.X86:
-            self.stack_address = int(self.ql.os.profile.get("OS32", "stack_address"), 16)
-            self.stack_size = int(self.ql.os.profile.get("OS32", "stack_size"), 16)
-            self.image_address = int(self.ql.os.profile.get("OS32", "image_address"), 16)
-            self.dll_address = int(self.ql.os.profile.get("OS32", "dll_address"), 16)
-            self.entry_point = int(self.ql.os.profile.get("OS32", "entry_point"), 16)
-            self.ql.os.heap_base_address = int(self.ql.os.profile.get("OS32", "heap_address"), 16)
-            self.ql.os.heap_base_size = int(self.ql.os.profile.get("OS32", "heap_size"), 16)
+
+        if self.ql.arch.type == QL_ARCH.X86:
+            WINOSARCH = "OS32"
             self.structure_last_addr = FS_SEGMENT_ADDR
-        elif self.ql.archtype == QL_ARCH.X8664:
-            self.stack_address = int(self.ql.os.profile.get("OS64", "stack_address"), 16)
-            self.stack_size = int(self.ql.os.profile.get("OS64", "stack_size"), 16)
-            self.image_address = int(self.ql.os.profile.get("OS64", "image_address"), 16)
-            self.dll_address = int(self.ql.os.profile.get("OS64", "dll_address"), 16)
-            self.entry_point = int(self.ql.os.profile.get("OS64", "entry_point"), 16)
-            self.ql.os.heap_base_address = int(self.ql.os.profile.get("OS64", "heap_address"), 16)
-            self.ql.os.heap_base_size = int(self.ql.os.profile.get("OS64", "heap_size"), 16)
+        elif self.ql.arch.type == QL_ARCH.X8664:
+            WINOSARCH = "OS64"
             self.structure_last_addr = GS_SEGMENT_ADDR
 
+        self.stack_address = int(self.ql.os.profile.get(WINOSARCH, "stack_address"), 16)
+        self.stack_size = int(self.ql.os.profile.get(WINOSARCH, "stack_size"), 16)
+        self.image_address = int(self.ql.os.profile.get(WINOSARCH, "image_address"), 16)
+        self.dll_address = int(self.ql.os.profile.get(WINOSARCH, "dll_address"), 16)
+        self.entry_point = int(self.ql.os.profile.get(WINOSARCH, "entry_point"), 16)
+        self.ql.os.heap_base_address = int(self.ql.os.profile.get(WINOSARCH, "heap_address"), 16)
+        self.ql.os.heap_base_size = int(self.ql.os.profile.get(WINOSARCH, "heap_size"), 16)
         self.dlls = {}
         self.import_symbols = {}
         self.export_symbols = {}
@@ -530,9 +527,9 @@ class QlLoaderPE(QlLoader, Process):
             # Stack should not init at the very bottom. Will cause errors with Dlls
             sp = self.stack_address + self.stack_size - 0x1000
 
-            if self.ql.archtype == QL_ARCH.X86:
-                self.ql.reg.esp = sp
-                self.ql.reg.ebp = sp
+            if self.ql.arch.type == QL_ARCH.X86:
+                self.ql.arch.regs.esp = sp
+                self.ql.arch.regs.ebp = sp
 
                 if self.pe.is_dll():
                     self.ql.log.debug('Setting up DllMain args')
@@ -544,18 +541,18 @@ class QlLoaderPE(QlLoader, Process):
                     self.ql.log.debug('Writing 0x01 (DLL_PROCESS_ATTACH) to [ESP+8](0x%08X)' % (sp + 0x8))
                     self.ql.mem.write(sp + 0x8, int(1).to_bytes(length=4, byteorder='little'))
 
-            elif self.ql.archtype == QL_ARCH.X8664:
-                self.ql.reg.rsp = sp
-                self.ql.reg.rbp = sp
+            elif self.ql.arch.type == QL_ARCH.X8664:
+                self.ql.arch.regs.rsp = sp
+                self.ql.arch.regs.rbp = sp
 
                 if self.pe.is_dll():
                     self.ql.log.debug('Setting up DllMain args')
 
                     self.ql.log.debug('Setting RCX (arg1) to %16X (IMAGE_BASE)' % (self.pe_image_address))
-                    self.ql.reg.rcx = self.pe_image_address
+                    self.ql.arch.regs.rcx = self.pe_image_address
 
                     self.ql.log.debug('Setting RDX (arg2) to 1 (DLL_PROCESS_ATTACH)')
-                    self.ql.reg.rdx = 1
+                    self.ql.arch.regs.rdx = 1
             else:
                 raise QlErrorArch("Unknown ql.arch")
 
@@ -569,24 +566,24 @@ class QlLoaderPE(QlLoader, Process):
                 super().init_ki_user_shared_data()
 
                 # setup IRQ Level in CR8 to PASSIVE_LEVEL (0)
-                self.ql.reg.write(UC_X86_REG_CR8, 0)
+                self.ql.arch.regs.write(UC_X86_REG_CR8, 0)
 
                 # setup CR4, some drivers may check this at initialized time
-                self.ql.reg.write(UC_X86_REG_CR4, 0x6f8)
+                self.ql.arch.regs.write(UC_X86_REG_CR4, 0x6f8)
 
                 self.ql.log.debug('Setting up DriverEntry args')
                 self.ql.stop_execution_pattern = 0xDEADC0DE
 
-                if self.ql.archtype == QL_ARCH.X86:  # Win32
-                    if not self.ql.stop_options.any:
+                if self.ql.arch.type == QL_ARCH.X86:  # Win32
+                    if not self.ql.stop_options:
                         # We know that a driver will return,
                         # so if the user did not configure stop options, write a sentinel return value
                         self.ql.mem.write(sp, self.ql.stop_execution_pattern.to_bytes(length=4, byteorder='little'))
 
                     self.ql.log.debug('Writing 0x%08X (PDRIVER_OBJECT) to [ESP+4](0x%08X)' % (self.ql.loader.driver_object_address, sp+0x4))
                     self.ql.log.debug('Writing 0x%08X (RegistryPath) to [ESP+8](0x%08X)' % (self.ql.loader.regitry_path_address, sp+0x8))
-                elif self.ql.archtype == QL_ARCH.X8664:  # Win64
-                    if not self.ql.stop_options.any:
+                elif self.ql.arch.type == QL_ARCH.X8664:  # Win64
+                    if not self.ql.stop_options:
                         # We know that a driver will return,
                         # so if the user did not configure stop options, write a sentinel return value
                         self.ql.mem.write(sp, self.ql.stop_execution_pattern.to_bytes(length=8, byteorder='little'))
@@ -603,19 +600,21 @@ class QlLoaderPE(QlLoader, Process):
             self.pe.parse_data_directories()
             data = bytearray(self.pe.get_memory_mapped_image())
             self.ql.mem.write(self.pe_image_address, bytes(data))
-            # setup IMAGE_LOAD_CONFIG_DIRECTORY
-            if self.pe.OPTIONAL_HEADER.DATA_DIRECTORY[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG']].VirtualAddress != 0:
-                SecurityCookie_rva = self.pe.DIRECTORY_ENTRY_LOAD_CONFIG.struct.SecurityCookie - self.pe.OPTIONAL_HEADER.ImageBase
-                SecurityCookie_value = default_security_cookie_value = self.ql.mem.read(self.pe_image_address+SecurityCookie_rva, self.ql.pointersize)
-                while SecurityCookie_value == default_security_cookie_value:
-                    SecurityCookie_value = secrets.token_bytes(self.ql.pointersize)
-                    # rol     rcx, 10h (rcx: cookie)
-                    # test    cx, 0FFFFh
-                    SecurityCookie_value_array = bytearray(SecurityCookie_value)
-                    # Sanity question: We are always little endian, right?
-                    SecurityCookie_value_array[-2:] = b'\x00\x00'
-                    SecurityCookie_value = bytes(SecurityCookie_value_array)
-                self.ql.mem.write(self.pe_image_address+SecurityCookie_rva, SecurityCookie_value)
+            
+            if self.is_driver:
+                # setup IMAGE_LOAD_CONFIG_DIRECTORY
+                if self.pe.OPTIONAL_HEADER.DATA_DIRECTORY[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG']].VirtualAddress != 0:
+                    SecurityCookie_rva = self.pe.DIRECTORY_ENTRY_LOAD_CONFIG.struct.SecurityCookie - self.pe.OPTIONAL_HEADER.ImageBase
+                    SecurityCookie_value = default_security_cookie_value = self.ql.mem.read(self.pe_image_address+SecurityCookie_rva, self.ql.arch.pointersize)
+                    while SecurityCookie_value == default_security_cookie_value:
+                        SecurityCookie_value = secrets.token_bytes(self.ql.arch.pointersize)
+                        # rol     rcx, 10h (rcx: cookie)
+                        # test    cx, 0FFFFh
+                        SecurityCookie_value_array = bytearray(SecurityCookie_value)
+                        # Sanity question: We are always little endian, right?
+                        SecurityCookie_value_array[-2:] = b'\x00\x00'
+                        SecurityCookie_value = bytes(SecurityCookie_value_array)
+                    self.ql.mem.write(self.pe_image_address+SecurityCookie_rva, SecurityCookie_value)
 
             # Add main PE to ldr_data_table
             mod_name = os.path.basename(self.path)
@@ -646,7 +645,7 @@ class QlLoaderPE(QlLoader, Process):
                         else:
                             addr = self.import_address_table[dll_name][imp.ordinal]
 
-                        if self.ql.archtype == QL_ARCH.X86:
+                        if self.ql.arch.type == QL_ARCH.X86:
                             address = self.ql.pack32(addr)
                         else:
                             address = self.ql.pack64(addr)
@@ -658,12 +657,12 @@ class QlLoaderPE(QlLoader, Process):
 
         elif self.ql.code:
             self.filepath = b""
-            if self.ql.archtype == QL_ARCH.X86:
-                self.ql.reg.esp = self.stack_address + 0x3000
-                self.ql.reg.ebp = self.ql.reg.esp
-            elif self.ql.archtype == QL_ARCH.X8664:
-                self.ql.reg.rsp = self.stack_address + 0x3000
-                self.ql.reg.rbp = self.ql.reg.rsp
+            if self.ql.arch.type == QL_ARCH.X86:
+                self.ql.arch.regs.esp = self.stack_address + 0x3000
+                self.ql.arch.regs.ebp = self.ql.arch.regs.esp
+            elif self.ql.arch.type == QL_ARCH.X8664:
+                self.ql.arch.regs.rsp = self.stack_address + 0x3000
+                self.ql.arch.regs.rbp = self.ql.arch.regs.rsp
 
             # load shellcode in
             self.ql.mem.map(self.entry_point, self.ql.os.code_ram_size, info="[shellcode_base]")
@@ -680,4 +679,4 @@ class QlLoaderPE(QlLoader, Process):
 
         # move entry_point to ql.os
         self.ql.os.entry_point = self.entry_point
-        self.init_sp = self.ql.reg.arch_sp
+        self.init_sp = self.ql.arch.regs.arch_sp

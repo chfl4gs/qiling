@@ -114,7 +114,7 @@ class QlFunctionCall:
 		if len(names) > len(types):
 			types.extend([None] * (len(names) - len(types)))
 
-		return zip(types, names, values)
+		return tuple(zip(types, names, values))
 
 	def call(self, func: CallHook, proto: Mapping[str, Any], params: Mapping[str, Any], hook_onenter: Optional[OnEnterHook], hook_onexit: Optional[OnExitHook], passthru: bool) -> Tuple[Iterable[TypedArg], int, int]:
 		"""Execute a hooked function.
@@ -131,7 +131,7 @@ class QlFunctionCall:
 		"""
 
 		ql = self.ql
-		pc = ql.reg.arch_pc
+		pc = ql.arch.regs.arch_pc
 
 		# if set, fire up the on-enter hook and let it override original args set
 		if hook_onenter:
@@ -187,11 +187,11 @@ class QlFunctionCall:
 		nslots = self.__count_slots(atype for atype, _ in args)
 		self.cc.reserve(nslots)
 
-		# set arguments values
-		self.writeParams(args)
-
 		if ret is not None:
 			self.cc.setReturnAddress(ret)
 
+		# set arguments values
+		self.writeParams(args)
+
 		# call
-		self.ql.reg.arch_pc = addr
+		self.ql.arch.regs.arch_pc = addr
