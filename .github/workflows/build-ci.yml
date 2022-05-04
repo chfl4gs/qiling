@@ -10,15 +10,11 @@ jobs:
       fail-fast: false
       matrix:
         #os: [windows-2019, macos-10.15, ubuntu-18.04, ubuntu-20.04]
-        os: [windows-latest, ubuntu-18.04, ubuntu-20.04]
-        python-version: [3.8, 3.9]
+        os: [windows-latest]
+        python-version: [3.9]
         exclude:
           - os: ubuntu-18.04
             python-version: 3.9                   
-        include:
-          - os: ubuntu-18.04
-            python-version: 3.9
-            container: Docker
 
     steps:
     - uses: actions/checkout@v2
@@ -51,23 +47,32 @@ jobs:
           powershell Start-Process -PassThru -Wait PowerShell -ArgumentList "'-Command Set-MpPreference -DisableBehaviorMonitoring \$true'"
           powershell Start-Process -PassThru -Wait PowerShell -ArgumentList "'-Command Set-MpPreference -DisableRealtimeMonitoring \$true'"
           powershell Start-Process -PassThru -Wait PowerShell -ArgumentList "'-Command  Add-MpPreference -ExclusionPath $GITHUB_WORKSPACE'"
-          pip3 install setuptools wheel
-          pip3 install .
+          #pip3 install setuptools wheel
+          #pip3 install .
           cd examples
           rm -rf rootfs
           curl -LJk -o master.zip https://github.com/qilingframework/rootfs/archive/refs/heads/master.zip && unzip master.zip
           mv rootfs-master rootfs
           cd $GITHUB_WORKSPACE
           cmd.exe //C 'examples\scripts\dllscollector.bat'
-          cd $GITHUB_WORKSPACE/examples/rootfs/x86_windows/bin
-          unzip -Pinfected wannacry.bin.zip
-          unzip -Pinfected UselessDisk.bin.zip
-          unzip -Pinfected GandCrab502.bin.zip
-          unzip -Pinfected al-khaser.bin.zip
-          unzip -Pinfected sality.dll.zip
-          cd $GITHUB_WORKSPACE/tests
-          cmd.exe //C '.\test_pe.bat'
+          #cd $GITHUB_WORKSPACE/examples/rootfs/x86_windows/bin
+          #unzip -Pinfected wannacry.bin.zip
+          #unzip -Pinfected UselessDisk.bin.zip
+          #unzip -Pinfected GandCrab502.bin.zip
+          #unzip -Pinfected al-khaser.bin.zip
+          #unzip -Pinfected sality.dll.zip
+          #cd $GITHUB_WORKSPACE/tests
+          #cmd.exe //C '.\test_pe.bat'
+    - uses: actions/upload-artifact@v3
+      if: contains(matrix.os, 'windows')
+      with:
+         name: jexamples
+         path: ${{ github.workspace }}/examples/rootfs
 
+    - uses: actions/download-artifact@v2
+      if: contains(matrix.os, 'windows')
+      with:
+         name: jexamples
 
     - name: linux run tests
       if: contains(matrix.os, 'ubuntu')
