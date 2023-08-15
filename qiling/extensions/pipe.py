@@ -2,52 +2,20 @@
 #
 # Cross Platform and Multi Architecture Advanced Binary Emulation Framework
 #
-
+import io
+import os
 from typing import TextIO
 
 from qiling.os.posix import stat
 
-class SimpleStringBuffer(TextIO):
+class SimpleStringBuffer(io.BytesIO):
     """Simple FIFO pipe.
     """
 
     def __init__(self):
-        self.buff = bytearray()
-
-    def read(self, n: int = -1) -> bytes:
-        if n == -1:
-            ret = self.buff
-            rem = bytearray()
-        else:
-            ret = self.buff[:n]
-            rem = self.buff[n:]
-
-        self.buff = rem
-
-        return bytes(ret)
-
-    def readline(self, limit: int = -1) -> bytes:
-        ret = bytearray()
-
-        while not (ret.endswith(b'\n') or len(ret) == limit):
-            ret.extend(self.read(1))
-
-        return bytes(ret)
-
-    def write(self, s: bytes) -> int:
-        self.buff.extend(s)
-
-        return len(s)
-
-    def flush(self) -> None:
-        pass
-
-    def writable(self) -> bool:
-        return True
-
-    def readable(self) -> bool:
-        return True
-
+        super().__init__()
+    
+    # Compatible with old implementation
     def seek(self, offset: int, origin: int = 0) -> int:
         # Imitate os.lseek
         raise OSError("Illega Seek")
@@ -55,9 +23,22 @@ class SimpleStringBuffer(TextIO):
     def seekable(self) -> bool:
         return False
 
+    def write(self, buf: bytes) -> int:
+        # For the FIFO stream, the write doesn't change pos.
+        pos = super().tell()
+        super().seek(0, os.SEEK_END)
+        ret = super().write(buf)
+        super().seek(pos)
+        return ret
+    
+    # Compatible with previous TextIO
+    @property
+    def name(self):
+        return None
+
 class SimpleStreamBase:
-    def __init__(self, fd: int, *args):
-        super().__init__(*args)
+    def __init__(self, fd: int):
+        super().__init__()
 
         self.__fd = fd
         self.__closed = False
@@ -65,6 +46,7 @@ class SimpleStreamBase:
     def close(self) -> None:
         self.__closed = True
     
+    @property
     def closed(self) -> bool:
         return self.__closed
 
@@ -99,72 +81,31 @@ class NullOutStream(SimpleStreamBase):
     def writable(self) -> bool:
         return True
 
-class SimpleBufferedStream(TextIO):
+class SimpleBufferedStream(io.BytesIO):
     """Simple buffered IO.
     """
 
     def __init__(self):
-        self.buff = bytearray()
-        self.cur = 0
+        super.__init__()
 
-    def seek(self, offset: int, origin: int = 0) -> int:
-        if origin == 0: # SEEK_SET
-            base = 0
-        elif origin == 1: # SEEK_CUR
-            base = self.cur
-        else: # SEEK_END
-            base = len(self.buff)
+class InteractiveInStream(io.BytesIO):
+    def read(self, size: int) -> bytes:
+        '''
+        Read from the BytesIO buffer. If theres no data left in the buffer, get additional user input
+        
+        Args:
+            size (int): The amount of bytes to read from the buffer
+        Returns:
+            bytes: The data read from the buffer
+        '''
+        
+        #get the amount of bytes left in the buffer
+        bytes_left = self.getbuffer().nbytes - self.tell()
 
-        if base + offset >= len(self.buff):
-            self.cur = len(self.buff)
-        elif base + offset <= 0:
-            self.cur = 0
-        else:
-            self.cur = base + offset
+        #if theres no bytes left in the buffer, get user input
+        if bytes_left == 0:
+            user_data = input().encode()+ b'\x0a'
+            self.write(user_data)
+            self.seek(-len(user_data), io.SEEK_CUR)
 
-        return self.cur
-    
-    def tell(self) -> int:
-        return self.cur
-
-    def read(self, n: int = -1) -> bytes:
-        if n == -1:
-            ret = self.buff[self.cur:]
-            self.cur = len(self.buff)
-        else:
-            ret = self.buff[self.cur:self.cur + n]
-
-            if self.cur + n >= len(self.buff):
-                self.cur = len(self.buff)
-            else:
-                self.cur = self.cur + n
-
-        return bytes(ret)
-
-    def readline(self, limit: int = -1) -> bytes:
-        ret = bytearray()
-
-        while not (ret.endswith(b'\n') or len(ret) == limit):
-            ret.extend(self.read(1))
-
-        return bytes(ret)
-
-    def write(self, s: bytes) -> int:
-        self.buff = self.buff[:self.cur]
-        self.buff.extend(s)
-
-        self.cur += len(s)
-
-        return len(s)
-
-    def flush(self) -> None:
-        pass
-
-    def writable(self) -> bool:
-        return True
-
-    def readable(self) -> bool:
-        return True
-
-    def seekable(self) -> bool:
-        return True
+        return super().read(size)

@@ -15,7 +15,7 @@ from qiling.os.windows.api import *
 from qiling.os.windows.const import *
 from qiling.os.windows.fncc import *
 from qiling.os.windows.handle import Handle
-from qiling.os.windows.structs import Win32FindData
+from qiling.os.windows.structs import FILETIME, make_win32_find_data
 
 # DWORD GetFileType(
 #   HANDLE hFile
@@ -46,50 +46,67 @@ def hook_FindFirstFileA(ql: Qiling, address: int, params):
     filename = params['lpFileName']
     pointer = params['lpFindFileData']
 
-    if filename == 0:
+    if not filename:
         return INVALID_HANDLE_VALUE
-    elif len(filename) >= MAX_PATH:
+
+    if len(filename) >= MAX_PATH:
         return ERROR_INVALID_PARAMETER
 
-    target_dir = os.path.join(ql.rootfs, filename.replace("\\", os.sep))
-    ql.log.info('TARGET_DIR = %s' % target_dir)
-    real_path = ql.os.path.transform_to_real_path(filename)
+    host_path = ql.os.path.virtual_to_host_path(filename)
 
     # Verify the directory is in ql.rootfs to ensure no path traversal has taken place
-    if not os.path.exists(real_path):
+    if not ql.os.path.is_safe_host_path(host_path):
         ql.os.last_error = ERROR_FILE_NOT_FOUND
+
         return INVALID_HANDLE_VALUE
 
     # Check if path exists
     filesize = 0
+
     try:
-        f = ql.os.fs_mapper.open(real_path, "r")
-        filesize = os.path.getsize(real_path)
+        f = ql.os.fs_mapper.open(host_path, "r")
+
+        filesize = os.path.getsize(host_path)
     except FileNotFoundError:
         ql.os.last_error = ERROR_FILE_NOT_FOUND
-        return INVALID_HANDLE_VALUE
 
-    # Get size of the file
-    file_size_low = filesize & 0xffffff
-    file_size_high = filesize >> 32
+        return INVALID_HANDLE_VALUE
 
     # Create a handle for the path
     new_handle = Handle(obj=f)
     ql.os.handle_manager.append(new_handle)
 
-    # Spoof filetime values
-    filetime = ql.pack64(datetime.now().microsecond)
+    # calculate file time
+    epoch = datetime(1601, 1, 1)
+    elapsed = datetime.now() - epoch
 
-    find_data = Win32FindData(
-                ql,
-                FILE_ATTRIBUTE_NORMAL,
-                filetime, filetime, filetime,
-                file_size_high, file_size_low,
-                0, 0,
-                filename,
-                0, 0, 0, 0,)
+    # number of 100-nanosecond intervals since Jan 1, 1601 utc
+    # where: (10 ** 9) / 100 -> (10 ** 7)
+    hnano = int(elapsed.total_seconds() * (10 ** 7))
 
-    find_data.write(pointer)
+    mask = (1 << 32) - 1
+
+    ftime = FILETIME(
+        (hnano >>  0) & mask,
+        (hnano >> 32) & mask
+    )
+
+    fdata_struct = make_win32_find_data(ql.arch.bits, wide=False)
+
+    with fdata_struct.ref(ql.mem, pointer) as fdata_obj:
+        fdata_obj.dwFileAttributes   = FILE_ATTRIBUTE_NORMAL
+        fdata_obj.ftCreationTime     = ftime
+        fdata_obj.ftLastAccessTime   = ftime
+        fdata_obj.ftLastWriteTime    = ftime
+        fdata_obj.nFileSizeHigh      = (filesize >> 32) & mask
+        fdata_obj.nFileSizeLow       = (filesize >>  0) & mask
+        fdata_obj.dwReserved0        = 0
+        fdata_obj.dwReserved1        = 0
+        fdata_obj.cFileName          = filename
+        fdata_obj.cAlternateFileName = 0
+        fdata_obj.dwFileType         = 0
+        fdata_obj.dwCreatorType      = 0
+        fdata_obj.wFinderFlags       = 0
 
     return new_handle.id
 
@@ -190,13 +207,12 @@ def hook_WriteFile(ql: Qiling, address: int, params):
         ql.os.last_error = ERROR_INVALID_HANDLE
         return 0
 
-    fobj = handle.obj
     data = ql.mem.read(lpBuffer, nNumberOfBytesToWrite)
 
-    if hFile == STD_OUTPUT_HANDLE:
+    if hFile in (STD_OUTPUT_HANDLE, STD_ERROR_HANDLE):
         ql.os.stats.log_string(data.decode())
 
-    written = fobj.write(bytes(data))
+    written = handle.obj.write(bytes(data))
     ql.mem.write_ptr(lpNumberOfBytesWritten, written, 4)
 
     return 1
@@ -206,20 +222,106 @@ def _CreateFile(ql: Qiling, address: int, params):
     dwDesiredAccess = params["dwDesiredAccess"]
     # dwShareMode = params["dwShareMode"]
     # lpSecurityAttributes = params["lpSecurityAttributes"]
-    # dwCreationDisposition = params["dwCreationDisposition"]
+    
+    # Handle Creation Disposition. I.e. how to respond
+    # when a file either exists or doesn't
+    # See https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea
+    dwCreationDisposition = params["dwCreationDisposition"]
+
     # dwFlagsAndAttributes = params["dwFlagsAndAttributes"]
     # hTemplateFile = params["hTemplateFile"]
 
     # access mask DesiredAccess
-    mode = ""
-    if dwDesiredAccess & GENERIC_WRITE:
-        mode += "wb"
+    perm_write = dwDesiredAccess & GENERIC_WRITE
+    perm_read  = dwDesiredAccess & GENERIC_READ
+    
+    # TODO: unused
+    perm_exec = dwDesiredAccess & GENERIC_EXECUTE
+
+    # only open file if it exists. error otherwise
+    open_existing = (
+        (dwCreationDisposition == OPEN_EXISTING) or
+        (dwCreationDisposition == TRUNCATE_EXISTING ) 
+        )
+     
+    # check if the file exists 
+    # TODO: race condition if file is deleted/reated  
+    file_exists = ql.os.fs_mapper.file_exists(s_lpFileName)
+
+    if (open_existing and (not file_exists)):
+        # the CreationDisposition wants a file to exist
+        # it does not 
+        ql.os.last_error = ERROR_FILE_NOT_FOUND
+        return INVALID_HANDLE_VALUE
+
+    if ((dwCreationDisposition == CREATE_NEW ) and file_exists):
+        # only create a file if it does not exist. 
+        # if it does, error
+        ql.os.last_error = ERROR_FILE_EXISTS
+
+    truncate  = (dwCreationDisposition == CREATE_ALWAYS) or  (dwCreationDisposition == TRUNCATE_EXISTING)
+
+    # TODO: this function does not handle general access masks. 
+    # see https://learn.microsoft.com/en-us/windows/win32/secauthz/access-mask
+    # it is only able to handle Generic R/W
+
+    # read only 
+    if (perm_read) and ( not (perm_write)):
+        mode = "rb"
+
+    # Write only
+    elif ( perm_write and (not perm_read)):
+        # TODO: fopen modes do not allow for write only access
+        # Likely need to use os.open instead. 
+
+        if (truncate and (not open_existing)) or (truncate and open_existing and file_exists):
+            # create a new file or truncate an existing one
+            mode = "wb"
+        else:   
+            ql.log.warn("_CreateFile has been called with Write only access. This is not currently supported and the handle is still allows for read access!")
+            # read/write, do not create. do not truncatd
+            mode = "rb+"
+    
+    elif perm_read and perm_write:
+        # Note that this ignores exec access mask 
+        mode = "rb+"
+
+    elif perm_exec:
+        # TODO: handle exec access mask
+        # it is only executable or has a non standard access mask
+        ql.log.warn("_CreateFile has been called with executable only access or with a non standard access mask. This is not currently supported and the handle is set to Read/Write")
+        mode = "rb+"        
     else:
-        mode += "rb"
+        # This is probably an invalid access mask
+        ql.log.warn(f"Invalid access mask provided: {dwDesiredAccess}")
+        # TODO: add error code 
+        return INVALID_HANDLE_VALUE
 
     try:
+        # we should have exited by now if the file doesn't exist
+        if (not file_exists) and (mode != "wb"):
+            status = ql.os.fs_mapper.create_empty_file(s_lpFileName)
+            if not status:
+                # could not create a new file
+                # bail out.
+                # TODO: set last_error
+                ql.log.warn(f"_CreateFile could not create new file {s_lpFileName}")
+                return INVALID_HANDLE_VALUE    
+
         f = ql.os.fs_mapper.open(s_lpFileName, mode)
+        if truncate and mode != "wb":
+            # redundant if mode is wb
+            f.truncate(0)
+
+        if dwCreationDisposition == CREATE_ALWAYS:
+                # we overwrote the file.
+                ql.os.last_error = ERROR_ALREADY_EXISTS
+                
+        if dwCreationDisposition == OPEN_ALWAYS:
+            ql.os.last_error = ERROR_ALREADY_EXISTS
+            
     except FileNotFoundError:
+        # Creation disposition determines what happens when the file doesn't exist
         ql.os.last_error = ERROR_FILE_NOT_FOUND
         return INVALID_HANDLE_VALUE
 
@@ -270,11 +372,13 @@ def hook_CreateFileA(ql: Qiling, address: int, params):
 def hook_CreateFileW(ql: Qiling, address: int, params):
     return  _CreateFile(ql, address, params)
 
-def _GetTempPath(ql: Qiling, address: int, params, wide: bool):
-    temp_path = ntpath.join(ql.rootfs, 'Windows', 'Temp')
+def _GetTempPath(ql: Qiling, address: int, params, *, wide: bool):
+    vtmpdir = ntpath.join(ql.os.windir, 'Temp')
+    htmpdir = ql.os.path.virtual_to_host_path(vtmpdir)
 
-    if not os.path.exists(temp_path):
-        os.makedirs(temp_path, 0o755)
+    if ql.os.path.is_safe_host_path(htmpdir):
+        if not os.path.exists(htmpdir):
+            os.makedirs(htmpdir, 0o755)
 
     nBufferLength = params['nBufferLength']
     lpBuffer = params['lpBuffer']
@@ -282,7 +386,7 @@ def _GetTempPath(ql: Qiling, address: int, params, wide: bool):
     enc = 'utf-16le' if wide else 'utf-8'
 
     # temp dir path has to end with a path separator
-    tmpdir = f'{ntpath.join(ql.os.windir, "Temp")}{ntpath.sep}'.encode(enc)
+    tmpdir = f'{vtmpdir}{ntpath.sep}'.encode(enc)
     cstr = tmpdir + '\x00'.encode(enc)
 
     if nBufferLength >= len(cstr):
@@ -324,29 +428,26 @@ def hook_GetTempPathA(ql: Qiling, address: int, params):
     'cchBuffer'     : DWORD
 })
 def hook_GetShortPathNameW(ql: Qiling, address: int, params):
-    paths = params["lpszLongPath"].split("\\")
-    dst = params["lpszShortPath"]
-    max_size = params["cchBuffer"]
-    res = paths[0]
+    lpszLongPath = params['lpszLongPath']
+    lpszShortPath = params['lpszShortPath']
+    cchBuffer = params['cchBuffer']
 
-    for path in paths[1:]:
-        nameAndExt = path.split(".")
-        name = nameAndExt[0]
-        ext = "" if len(nameAndExt) == 1 else "." + nameAndExt[1]
+    def __shorten(p: str) -> str:
+        name, ext = ntpath.splitext(p)
 
-        if len(name) > 8:
-            name = name[:6] + "~1"
+        return f'{(name[:6] + "~1") if len(name) > 8 else name}{ext}'
 
-        res += "\\" + name + ext
+    shortpath = ntpath.join(*(__shorten(elem) for elem in lpszLongPath.split(ntpath.sep)))
+    encoded = f'{shortpath}\x00'.encode('utf-16le')
 
-    res += "\x00"
-    res = res.encode("utf-16le")
+    if len(shortpath) > cchBuffer:
+        return len(shortpath) + 1
 
-    if max_size < len(res):
-        return len(res)
+    if lpszShortPath:
+        ql.mem.write(lpszShortPath, encoded)
 
-    ql.mem.write(dst, res)
-    return len(res) - 1
+    # on succes, return chars count excluding null-term
+    return len(shortpath)
 
 
 # BOOL GetVolumeInformationW(
@@ -471,18 +572,20 @@ def hook_GetDiskFreeSpaceW(ql: Qiling, address: int, params):
     'lpSecurityAttributes' : LPSECURITY_ATTRIBUTES
 })
 def hook_CreateDirectoryA(ql: Qiling, address: int, params):
-    path_name = params["lpPathName"]
-    target_dir = os.path.join(ql.rootfs, path_name.replace("\\", os.sep))
-    ql.log.info('TARGET_DIR = %s' % target_dir)
+    lpPathName = params['lpPathName']
 
-    # Verify the directory is in ql.rootfs to ensure no path traversal has taken place
-    real_path = ql.os.path.transform_to_real_path(path_name)
+    dst = ql.os.path.virtual_to_host_path(lpPathName)
 
-    if os.path.exists(real_path):
+    if not ql.os.path.is_safe_host_path(dst):
+        ql.os.last_error = ERROR_GEN_FAILURE
+        return 0
+
+    if os.path.exists(dst):
         ql.os.last_error = ERROR_ALREADY_EXISTS
         return 0
 
-    os.mkdir(real_path)
+    os.mkdir(dst, 0o755)
+
     return 1
 
 # DWORD GetFileSize(
@@ -494,13 +597,20 @@ def hook_CreateDirectoryA(ql: Qiling, address: int, params):
     'lpFileSizeHigh' : LPDWORD
 })
 def hook_GetFileSize(ql: Qiling, address: int, params):
+    hFile = params["hFile"]
+
+    handle = ql.os.handle_manager.get(hFile)
+
+    if handle is None:
+        ql.os.last_error = ERROR_INVALID_HANDLE
+        return -1 # INVALID_FILE_SIZE
+
     try:
-        handle = ql.os.handle_manager.get(params['hFile'])
 
         return os.path.getsize(handle.obj.name)
     except:
         ql.os.last_error = ERROR_INVALID_HANDLE
-        return 0xFFFFFFFF #INVALID_FILE_SIZE
+        return -1 # INVALID_FILE_SIZE
 
 def _CreateFileMapping(ql: Qiling, address: int, params):
     hFile = params['hFile']
@@ -619,14 +729,23 @@ def hook_UnmapViewOfFile(ql: Qiling, address: int, params):
     'bFailIfExists'      : BOOL
 })
 def hook_CopyFileA(ql: Qiling, address: int, params):
-    lpExistingFileName = ql.os.path.transform_to_real_path(params["lpExistingFileName"])
-    lpNewFileName = ql.os.path.transform_to_real_path(params["lpNewFileName"])
-    bFailIfExists = params["bFailIfExists"]
+    lpExistingFileName = params['lpExistingFileName']
+    lpNewFileName = params['lpNewFileName']
+    bFailIfExists = params['bFailIfExists']
 
-    if bFailIfExists and os.path.exists(lpNewFileName):
+    src = ql.os.path.virtual_to_host_path(lpExistingFileName)
+    dst = ql.os.path.virtual_to_host_path(lpNewFileName)
+
+    if not ql.os.path.is_safe_host_path(src) or not ql.os.path.is_safe_host_path(dst):
+        ql.os.last_error = ERROR_GEN_FAILURE
         return 0
 
-    copyfile(lpExistingFileName, lpNewFileName)
+    if bFailIfExists and os.path.exists(dst):
+        ql.os.last_error = ERROR_FILE_EXISTS
+        return 0
+
+    copyfile(src, dst)
+
     return 1
 
 # BOOL SetFileAttributesA(
@@ -663,6 +782,22 @@ def hook_SetFileApisToANSI(ql: Qiling, address: int, params):
 def hook_SetFileApisToOEM(ql: Qiling, address: int, params):
     pass
 
+def _DeleteFile(ql: Qiling, address: int, params):
+    lpFileName = params["lpFileName"]
+
+    dst = ql.os.path.virtual_to_host_path(lpFileName)
+
+    if not ql.os.path.is_safe_host_path(dst):
+        ql.os.last_error = ERROR_GEN_FAILURE
+        return 0
+
+    try:
+        os.remove(dst)
+    except OSError:
+        return 0
+
+    return 1
+
 # BOOL DeleteFileA(
 #   LPCSTR lpFileName
 # );
@@ -670,12 +805,7 @@ def hook_SetFileApisToOEM(ql: Qiling, address: int, params):
     'lpFileName' : LPCSTR
 })
 def hook_DeleteFileA(ql: Qiling, address: int, params):
-    lpFileName = ql.os.path.transform_to_real_path(params["lpFileName"])
-    try:
-        os.remove(lpFileName)
-        return 1
-    except:
-        return 0
+    return _DeleteFile(ql, address, params)
 
 # BOOL DeleteFileW(
 #   LPCWSTR lpFileName
@@ -684,9 +814,4 @@ def hook_DeleteFileA(ql: Qiling, address: int, params):
     'lpFileName' : LPCWSTR
 })
 def hook_DeleteFileW(ql: Qiling, address: int, params):
-    lpFileName = ql.os.path.transform_to_real_path(params["lpFileName"])
-    try:
-        os.remove(lpFileName)
-        return 1
-    except:
-        return 0
+    return _DeleteFile(ql, address, params)

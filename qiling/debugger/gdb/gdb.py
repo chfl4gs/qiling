@@ -13,9 +13,13 @@
 # gdb remote protocol:
 #   https://sourceware.org/gdb/current/onlinedocs/gdb/Remote-Protocol.html
 
-import os, socket, re
+import os
+import socket
+import re
+import tempfile
+from functools import partial
 from logging import Logger
-from typing import Iterator, Optional, Union
+from typing import IO, Iterator, MutableMapping, Optional, Union
 
 from unicorn import UcError
 from unicorn.unicorn_const import (
@@ -30,6 +34,7 @@ from qiling.const import QL_ARCH, QL_ENDIAN, QL_OS
 from qiling.debugger import QlDebugger
 from qiling.debugger.gdb.xmlregs import QlGdbFeatures
 from qiling.debugger.gdb.utils import QlGdbUtils
+from qiling.os.linux.procfs import QlProcFS
 
 # gdb logging prompt
 PROMPT = r'gdb>'
@@ -59,11 +64,12 @@ REPLY_OK = b'OK'
 # reply type
 Reply = Union[bytes, str]
 
+
 class QlGdb(QlDebugger):
     """A simple gdbserver implementation.
     """
 
-    def __init__(self, ql: Qiling, ip: str = '127.0.01', port: int = 9999):
+    def __init__(self, ql: Qiling, ip: str = '127.0.0.1', port: int = 9999):
         super().__init__(ql)
 
         if type(port) is str:
@@ -89,6 +95,11 @@ class QlGdb(QlDebugger):
         else:
             entry_point = ql.os.entry_point
 
+        # though linkers set the entry point LSB to indicate arm thumb mode, the
+        # effective entry point address is aligned. make sure we have it aligned
+        if hasattr(ql.arch, 'is_thumb'):
+            entry_point &= ~0b1
+
         # Only part of the binary file will be debugged.
         if ql.entry_point is not None:
             entry_point = ql.entry_point
@@ -100,6 +111,8 @@ class QlGdb(QlDebugger):
 
         self.features = QlGdbFeatures(self.ql.arch.type, self.ql.os.type)
         self.regsmap = self.features.regsmap
+
+        self.fake_procfs: MutableMapping[int, IO] = {}
 
     def run(self):
         server = GdbSerialConn(self.ip, self.port, self.ql.log)
@@ -150,10 +163,8 @@ class QlGdb(QlDebugger):
 
             return int.from_bytes(raw, 'big')
 
-
         def handle_exclaim(subcmd: str) -> Reply:
             return REPLY_OK
-
 
         def handle_qmark(subcmd: str) -> Reply:
             """Request status.
@@ -203,7 +214,6 @@ class QlGdb(QlDebugger):
 
             return f'T{SIGTRAP:02x}{bp_info}{sp_info}{pc_info}'
 
-
         def handle_c(subcmd: str) -> Reply:
             try:
                 self.gdb.resume_emu()
@@ -229,7 +239,7 @@ class QlGdb(QlDebugger):
                 reply = f'S{SIGINT:02x}'
 
             else:
-                if self.ql.arch.regs.arch_pc == self.gdb.last_bp:
+                if getattr(self.ql.arch, 'effective_pc', self.ql.arch.regs.arch_pc) == self.gdb.last_bp:
                     # emulation stopped because it hit a breakpoint
                     reply = f'S{SIGTRAP:02x}'
                 else:
@@ -237,7 +247,6 @@ class QlGdb(QlDebugger):
                     reply = f'W{self.ql.os.exit_code:02x}'
 
             return reply
-
 
         def handle_g(subcmd: str) -> Reply:
             # NOTE: in the past the 'g' reply packet for arm included the f0-f7 and fps registers between pc
@@ -253,7 +262,6 @@ class QlGdb(QlDebugger):
 
             return ''.join(__get_reg_value(*entry) for entry in self.regsmap)
 
-
         def handle_G(subcmd: str) -> Reply:
             data = subcmd
 
@@ -264,7 +272,6 @@ class QlGdb(QlDebugger):
 
             return REPLY_OK
 
-
         def handle_H(subcmd: str) -> Reply:
             op = subcmd[0]
 
@@ -273,13 +280,11 @@ class QlGdb(QlDebugger):
 
             return REPLY_EMPTY
 
-
         def handle_k(subcmd: str) -> Reply:
             global killed
 
             killed = True
             return REPLY_OK
-
 
         def handle_m(subcmd: str) -> Reply:
             """Read target memory.
@@ -293,7 +298,6 @@ class QlGdb(QlDebugger):
                 return 'E14'
             else:
                 return data
-
 
         def handle_M(subcmd: str) -> Reply:
             """Write target memory.
@@ -314,7 +318,6 @@ class QlGdb(QlDebugger):
             else:
                 return REPLY_OK
 
-
         def handle_p(subcmd: str) -> Reply:
             """Read register value by index.
             """
@@ -322,7 +325,6 @@ class QlGdb(QlDebugger):
             idx = int(subcmd, 16)
 
             return __get_reg_value(*self.regsmap[idx])
-
 
         def handle_P(subcmd: str) -> Reply:
             """Write register value by index.
@@ -337,7 +339,6 @@ class QlGdb(QlDebugger):
                 return REPLY_OK
 
             return 'E00'
-
 
         def handle_Q(subcmd: str) -> Reply:
             """General queries.
@@ -361,13 +362,11 @@ class QlGdb(QlDebugger):
 
             return REPLY_OK if feature in supported else REPLY_EMPTY
 
-
         def handle_D(subcmd: str) -> Reply:
             """Detach.
             """
 
             return REPLY_OK
-
 
         def handle_q(subcmd: str) -> Reply:
             query, *data = subcmd.split(':')
@@ -378,7 +377,7 @@ class QlGdb(QlDebugger):
 
             if query == 'Supported':
                 # list of supported features excluding the multithreading-related ones
-                common = (
+                features = [
                     'BreakpointCommands+',
                     'ConditionalBreakpoints+',
                     'ConditionalTracepoints+',
@@ -388,13 +387,9 @@ class QlGdb(QlDebugger):
                     'QAgent+',
                     'QCatchSyscalls+',
                     'QDisableRandomization+',
-                    'QEnvironmentHexEncoded+',
-                    'QEnvironmentReset+',
-                    'QEnvironmentUnset+',
                     'QNonStop+',
                     'QPassSignals+',
                     'QProgramSignals+',
-                    'QSetWorkingDir+',
                     'QStartNoAckMode+',
                     'QStartupWithShell+',
                     'QTBuffer:size+',
@@ -407,24 +402,21 @@ class QlGdb(QlDebugger):
                     'hwbreak+',
                     'multiprocess+',
                     'no-resumed+',
-                    'qXfer:auxv:read+',
-                    'qXfer:exec-file:read+',
                     'qXfer:features:read+',
                     # 'qXfer:libraries-svr4:read+',
                     # 'qXfer:osdata:read+',
                     'qXfer:siginfo:read+',
                     'qXfer:siginfo:write+',
                     'qXfer:statictrace:read+',
-                    'qXfer:threads:read+',
                     'qXfer:traceframe-info:read+',
                     'swbreak+',
                     'tracenz+',
                     'vfork-events+'
-                )
+                ]
 
                 # might or might not need for multi thread
                 if self.ql.multithread:
-                    features = (
+                    features += [
                         'PacketSize=47ff',
                         'FastTracepoints+',
                         'QThreadEvents+',
@@ -436,16 +428,36 @@ class QlGdb(QlDebugger):
                         'qXfer:btrace-conf:read+',
                         'qXfer:btrace:read+',
                         'vContSupported+'
-                    )
+                    ]
 
                 else:
-                    features = (
+                    features += [
                         'PacketSize=3fff',
                         'qXfer:spu:read+',
                         'qXfer:spu:write+'
-                    )
+                    ]
 
-                return ';'.join(common + features)
+                # os dependent features
+                if not self.ql.interpreter:
+                    features += [
+                        'QEnvironmentHexEncoded+',
+                        'QEnvironmentReset+',
+                        'QEnvironmentUnset+'
+                    ]
+
+                    # filesystem dependent features
+                    if hasattr(self.ql.os, 'path'):
+                        features += [
+                            'QSetWorkingDir+',
+                            'qXfer:auxv:read+',
+                            'qXfer:exec-file:read+'
+                        ]
+
+                    # process dependent features
+                    if hasattr(self.ql.os, 'pid'):
+                        features.append('qXfer:threads:read+')
+
+                return ';'.join(features)
 
             elif query == 'Xfer':
                 feature, op, annex, params = data
@@ -462,39 +474,27 @@ class QlGdb(QlDebugger):
                     return f'{"l" if len(content) < length else "m"}{content}'
 
                 elif feature == 'threads' and op == 'read':
-                    if not self.ql.baremetal and hasattr(self.ql.os, 'pid'):
-                        content = '\r\n'.join((
-                            '<threads>',
-                            f'<thread id="{self.ql.os.pid}" core="1" name="{self.ql.targetname}"/>',
-                            '</threads>'
-                        ))
-
-                    else:
-                        content = ''
+                    content = '\r\n'.join((
+                        '<threads>',
+                        f'<thread id="{self.ql.os.pid}" core="1" name="{self.ql.targetname}"/>',
+                        '</threads>'
+                    ))
 
                     return f'l{content}'
 
                 elif feature == 'auxv' and op == 'read':
-                    auxv_data = bytearray()
+                    try:
+                        with self.ql.os.fs_mapper.open('/proc/self/auxv', 'rb') as infile:
+                            infile.seek(offset, 0)  # SEEK_SET
+                            auxv_data = infile.read(length)
 
-                    if hasattr(self.ql.loader, 'auxv'):
-                        nbytes = self.ql.arch.bits // 8
+                    except FileNotFoundError:
+                        auxv_data = b''
 
-                        auxv_addr = self.ql.loader.auxv + offset
-                        null_entry = bytes(nbytes * 2)
-
-                        # keep reading until AUXV.AT_NULL is reached
-                        while not auxv_data.endswith(null_entry):
-                            auxv_data.extend(self.ql.mem.read(auxv_addr, nbytes))
-                            auxv_addr += nbytes
-
-                            auxv_data.extend(self.ql.mem.read(auxv_addr, nbytes))
-                            auxv_addr += nbytes
-
-                    return b'l' + auxv_data[:length]
+                    return b'l' + auxv_data
 
                 elif feature == 'exec-file' and op == 'read':
-                    return f'l{os.path.abspath(self.ql.path)}'
+                    return f'l{self.ql.os.path.host_to_virtual_path(self.ql.path)}'
 
                 elif feature == 'libraries-svr4' and op == 'read':
                     # TODO: this one requires information of loaded libraries which currently not provided
@@ -564,7 +564,6 @@ class QlGdb(QlDebugger):
 
             return REPLY_EMPTY
 
-
         def handle_v(subcmd: str) -> Reply:
             if subcmd == 'MustReplyEmpty':
                 return REPLY_EMPTY
@@ -584,16 +583,38 @@ class QlGdb(QlDebugger):
                         flags = int(flags, 16)
                         mode = int(mode, 16)
 
-                        # try to guess whether this is an emulated path or real one
-                        if path.startswith(os.path.abspath(self.ql.rootfs)):
-                            host_path = path
+                        virtpath = self.ql.os.path.virtual_abspath(path)
+
+                        if virtpath.startswith(r'/proc/'):
+                            pid, _, vfname = virtpath[6:].partition(r'/')
+
+                            # 42000 is a magic number indicating the remote process' pid
+                            # see: https://sourceware.org/bugzilla/show_bug.cgi?id=17760
+                            if pid == '42000':
+                                vfmap = {
+                                    'maps': lambda: partial(QlProcFS.self_map, self.ql.mem)
+                                }
+
+                                if vfname in vfmap and not self.ql.os.fs_mapper.has_mapping(virtpath):
+                                    self.ql.add_fs_mapper(virtpath, vfmap[vfname]())
+
+                            if self.ql.os.fs_mapper.has_mapping(virtpath):
+                                # Mapped object by itself is not backed with a host fd and thus a tempfile can
+                                # 1. Make pread easy to implement and avoid duplicate code like seek, fd etc.
+                                # 2. Avoid fd clash if we assign a generated fd.
+                                tfile = tempfile.TemporaryFile("rb+")
+                                tfile.write(self.ql.os.fs_mapper.open(virtpath, "rb+").read())
+                                tfile.seek(0, os.SEEK_SET)
+
+                                fd = tfile.fileno()
+                                self.fake_procfs[fd] = tfile
                         else:
                             host_path = self.ql.os.path.virtual_to_host_path(path)
 
-                        self.ql.log.debug(f'{PROMPT} target file: {host_path}')
+                            self.ql.log.debug(f'{PROMPT} target host path: {host_path}')
 
-                        if os.path.exists(host_path) and not path.startswith(r'/proc'):
-                            fd = os.open(host_path, flags, mode)
+                            if os.path.exists(host_path):
+                                fd = os.open(host_path, flags, mode)
 
                     return f'F{fd:x}'
 
@@ -609,6 +630,10 @@ class QlGdb(QlDebugger):
                     fd = int(fd, 16)
 
                     os.close(fd)
+
+                    if fd in self.fake_procfs:
+                        del self.fake_procfs[fd]
+
                     return 'F0'
 
                 return REPLY_EMPTY
@@ -628,7 +653,7 @@ class QlGdb(QlDebugger):
                     groups = subcmd.split(';')[1:]
 
                     for grp in groups:
-                        cmd, tid = grp.split(':', maxsplit=1)
+                        cmd, *tid = grp.split(':', maxsplit=1)
 
                         if cmd in ('c', f'C{SIGTRAP:02x}'):
                             return handle_c('')
@@ -642,21 +667,13 @@ class QlGdb(QlDebugger):
 
             return REPLY_EMPTY
 
-
         def handle_s(subcmd: str) -> Reply:
             """Perform a single step.
             """
 
-            # BUG: a known unicorn caching issue causes it to emulate more
-            # steps than requestes. until that issue is fixed, single stepping
-            # is essentially broken.
-            #
-            # @see: https://github.com/unicorn-engine/unicorn/issues/1606
-
             self.gdb.resume_emu(steps=1)
 
             return f'S{SIGTRAP:02x}'
-
 
         def handle_X(subcmd: str) -> Reply:
             """Write data to memory.
@@ -676,7 +693,6 @@ class QlGdb(QlDebugger):
             else:
                 return REPLY_OK
 
-
         def handle_Z(subcmd: str) -> Reply:
             """Insert breakpoints or watchpoints.
             """
@@ -692,11 +708,11 @@ class QlGdb(QlDebugger):
             #   4 = access watchpoint
 
             if type == 0:
-                self.gdb.bp_insert(addr)
-                return REPLY_OK
+                success = self.gdb.bp_insert(addr, kind)
+
+                return REPLY_OK if success else 'E22'
 
             return REPLY_EMPTY
-
 
         def handle_z(subcmd: str) -> Reply:
             """Remove breakpoints or watchpoints.
@@ -705,15 +721,11 @@ class QlGdb(QlDebugger):
             type, addr, kind = (int(p, 16) for p in subcmd.split(','))
 
             if type == 0:
-                try:
-                    self.gdb.bp_remove(addr)
-                except ValueError:
-                    return 'E22'
-                else:
-                    return REPLY_OK
+                success = self.gdb.bp_remove(addr, kind)
+
+                return REPLY_OK if success else 'E22'
 
             return REPLY_EMPTY
-
 
         handlers = {
             '!': handle_exclaim,

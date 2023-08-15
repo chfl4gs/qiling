@@ -2,7 +2,7 @@
 # 
 # Cross Platform and Multi Architecture Advanced Binary Emulation Framework
 
-from typing import Any, Callable, Iterable, MutableMapping, Optional, Mapping, Tuple, Sequence
+from typing import Any, Callable, Iterable, Iterator, MutableMapping, Optional, Mapping, Tuple, Sequence
 
 from qiling import Qiling
 from qiling.cc import QlCC
@@ -19,179 +19,194 @@ OnExitHook = Callable[[Qiling, int, Mapping, int], int]
 TypedArg = Tuple[Any, str, Any]
 
 class QlFunctionCall:
-	def __init__(self, ql: Qiling, cc: QlCC, accessors: Mapping[int, Accessor] = {}) -> None:
-		"""Initialize function call handler.
+    def __init__(self, ql: Qiling, cc: QlCC, accessors: Mapping[int, Accessor] = {}) -> None:
+        """Initialize function call handler.
 
-		Args:
-			ql: qiling instance
-			cc: calling convention instance to handle the call
-			accessors: a mapping of parameter types to methods that read and write their values (optional)
-		"""
+        Args:
+            ql: qiling instance
+            cc: calling convention instance to handle the call
+            accessors: a mapping of parameter types to methods that read and write their values (optional)
+        """
 
-		self.ql = ql
-		self.cc = cc
+        self.ql = ql
+        self.cc = cc
 
-		def __make_accessor(nbits: int) -> Accessor:
-			reader = lambda si: cc.getRawParam(si, nbits)
-			writer = lambda si, val: cc.setRawParam(si, val, nbits)
-			nslots = cc.getNumSlots(nbits)
+        def __make_accessor(nbits: int) -> Accessor:
+            reader = lambda si: cc.getRawParam(si, nbits)
+            writer = lambda si, val: cc.setRawParam(si, val, nbits)
+            nslots = cc.getNumSlots(nbits)
 
-			return (reader, writer, nslots)
+            return (reader, writer, nslots)
 
-		# default parameter accessors: readers, writers and slots count
-		self.accessors: MutableMapping[int, Accessor] = {
-			PARAM_INT8 : __make_accessor(8),
-			PARAM_INT16: __make_accessor(16),
-			PARAM_INT32: __make_accessor(32),
-			PARAM_INT64: __make_accessor(64),
-			PARAM_INTN : __make_accessor(0)
-		}
+        # default parameter accessors: readers, writers and slots count
+        self.accessors: MutableMapping[int, Accessor] = {
+            PARAM_INT8 : __make_accessor(8),
+            PARAM_INT16: __make_accessor(16),
+            PARAM_INT32: __make_accessor(32),
+            PARAM_INT64: __make_accessor(64),
+            PARAM_INTN : __make_accessor(0)
+        }
 
-		# let the user override default accessors or add custom ones
-		self.accessors.update(accessors)
+        # let the user override default accessors or add custom ones
+        self.accessors.update(accessors)
 
-	def readParams(self, ptypes: Sequence[Any]) -> Sequence[int]:
-		"""Walk the function parameters list and get their values.
+    def readEllipsis(self, ptypes: Sequence[Any]) -> Iterator[int]:
+        """
+        """
 
-		Args:
-			ptypes: a sequence of parameters types to read
+        default = self.accessors[PARAM_INTN]
 
-		Returns: parameters raw values
-		"""
+        # count skipped slots
+        si = sum(self.accessors.get(typ, default)[2] for typ in ptypes)
 
-		default = self.accessors[PARAM_INTN]
+        while True:
+            read, _, nslots = default
 
-		si = 0
-		values = []
+            yield read(si)
+            si += nslots
 
-		for typ in ptypes:
-			read, _, nslots = self.accessors.get(typ, default)
+    def readParams(self, ptypes: Sequence[Any]) -> Sequence[int]:
+        """Walk the function parameters list and get their values.
 
-			val = read(si)
-			si += nslots
+        Args:
+            ptypes: a sequence of parameters types to read
 
-			values.append(val)
+        Returns: parameters raw values
+        """
 
-		return values
+        default = self.accessors[PARAM_INTN]
 
-	def writeParams(self, params: Sequence[Tuple[Any, int]]) -> None:
-		"""Walk the function parameters list and set their values.
+        si = 0
+        values = []
 
-		Args:
-			params: a sequence of 2-tuples containing parameters types and values
-		"""
+        for typ in ptypes:
+            read, _, nslots = self.accessors.get(typ, default)
 
-		default = self.accessors[PARAM_INTN]
+            val = read(si)
+            si += nslots
 
-		si = 0
+            values.append(val)
 
-		for typ, val in params:
-			_, write, nslots = self.accessors.get(typ, default)
+        return values
 
-			write(si, val)
-			si += nslots
+    def writeParams(self, params: Sequence[Tuple[Any, int]]) -> None:
+        """Walk the function parameters list and set their values.
 
-	def __count_slots(self, ptypes: Iterable[Any]) -> int:
-		default = self.accessors[PARAM_INTN]
+        Args:
+            params: a sequence of 2-tuples containing parameters types and values
+        """
 
-		return sum(self.accessors.get(typ, default)[2] for typ in ptypes)
+        default = self.accessors[PARAM_INTN]
 
-	@staticmethod
-	def __get_typed_args(proto: Mapping[str, Any], args: Mapping[str, Any]) -> Iterable[TypedArg]:
-		types = list(proto.values())
-		names = list(args.keys())
-		values = list(args.values())
+        si = 0
 
-		# variadic functions are invoked with unknown set of arguments which
-		# do not explicitly appear in prototype (there is an ellipsis instead).
-		#
-		# when a hooked variadic function is called, it updates the arguments
-		# mapping with the additional arguments it was given. that makes the
-		# arguments mapping longer than the prototype mapping; in other words:
-		# at this point we may have more values and names than types.
-		#
-		# here we expand the types list to meet names length, in such a case.
-		if len(names) > len(types):
-			types.extend([None] * (len(names) - len(types)))
+        for typ, val in params:
+            _, write, nslots = self.accessors.get(typ, default)
 
-		return tuple(zip(types, names, values))
+            write(si, val)
+            si += nslots
 
-	def call(self, func: CallHook, proto: Mapping[str, Any], params: Mapping[str, Any], hook_onenter: Optional[OnEnterHook], hook_onexit: Optional[OnExitHook], passthru: bool) -> Tuple[Iterable[TypedArg], int, int]:
-		"""Execute a hooked function.
+    def __count_slots(self, ptypes: Iterable[Any]) -> int:
+        default = self.accessors[PARAM_INTN]
 
-		Args:
-			func: function hook
-			proto: function's parameters types list
-			params: a mapping of parameter names to their values 
-			hook_onenter: a hook to call before entering function hook
-			hook_onexit: a hook to call after returning from function hook
-			passthru: whether to skip stack frame unwinding
+        return sum(self.accessors.get(typ, default)[2] for typ in ptypes)
 
-		Returns: resolved params mapping, return value, return address
-		"""
+    @staticmethod
+    def __get_typed_args(proto: Mapping[str, Any], args: Mapping[str, Any]) -> Iterable[TypedArg]:
+        types = list(proto.values())
+        names = list(args.keys())
+        values = list(args.values())
 
-		ql = self.ql
-		pc = ql.arch.regs.arch_pc
+        # variadic functions are invoked with unknown set of arguments which
+        # do not explicitly appear in prototype (there is an ellipsis instead).
+        #
+        # when a hooked variadic function is called, it updates the arguments
+        # mapping with the additional arguments it was given. that makes the
+        # arguments mapping longer than the prototype mapping; in other words:
+        # at this point we may have more values and names than types.
+        #
+        # here we expand the types list to meet names length, in such a case.
+        if len(names) > len(types):
+            types.extend([None] * (len(names) - len(types)))
 
-		# if set, fire up the on-enter hook and let it override original args set
-		if hook_onenter:
-			overrides = hook_onenter(ql, pc, params)
+        return tuple(zip(types, names, values))
 
-			if overrides is not None:
-				pc, params = overrides
+    def call(self, func: CallHook, proto: Mapping[str, Any], params: Mapping[str, Any], hook_onenter: Optional[OnEnterHook], hook_onexit: Optional[OnExitHook], passthru: bool) -> Tuple[Iterable[TypedArg], int, int]:
+        """Execute a hooked function.
 
-		# call function
-		retval = func(ql, pc, params)
+        Args:
+            func: function hook
+            proto: function's parameters types list
+            params: a mapping of parameter names to their values 
+            hook_onenter: a hook to call before entering function hook
+            hook_onexit: a hook to call after returning from function hook
+            passthru: whether to skip stack frame unwinding
 
-		# if set, fire up the on-exit hook and let it override the return value
-		if hook_onexit:
-			override = hook_onexit(ql, pc, params, retval)
+        Returns: resolved params mapping, return value, return address
+        """
 
-			if override is not None:
-				retval = override
+        ql = self.ql
+        pc = ql.arch.regs.arch_pc
 
-		# set return value
-		if retval is not None:
-			self.cc.setReturnValue(retval)
+        # if set, fire up the on-enter hook and let it override original args set
+        if hook_onenter:
+            overrides = hook_onenter(ql, pc, params)
 
-		targs = QlFunctionCall.__get_typed_args(proto, params)
+            if overrides is not None:
+                pc, params = overrides
 
-		# TODO: resolve return value
+        # call function
+        retval = func(ql, pc, params)
 
-		# unwind stack frame; note that function prototype sometimes does not
-		# reflect the actual number of arguments passed to the function, like
-		# in variadic functions (e.g. printf-like functions). in such case the
-		# function frame would not be unwinded entirely and cause the program
-		# to fail or produce funny results.
-		# 
-		# nevertheless this type of functions never unwind their own frame,
-		# exactly for the reason they are not aware of the actual number of
-		# arguments they got. since the caller is responsible for unwinding
-		# we should be good.
+        # if set, fire up the on-exit hook and let it override the return value
+        if hook_onexit:
+            override = hook_onexit(ql, pc, params, retval)
 
-		nslots = self.__count_slots(proto.values())
-		retaddr = -1 if passthru else self.cc.unwind(nslots)
+            if override is not None:
+                retval = override
 
-		return targs, retval, retaddr
+        # set return value
+        if retval is not None:
+            self.cc.setReturnValue(retval)
 
-	def call_native(self, addr: int, args: Sequence[Tuple[Any, int]], ret: Optional[int]) -> None:
-		"""Call a native function after properly staging its arguments and return address.
+        targs = QlFunctionCall.__get_typed_args(proto, params)
 
-		Args:
-			addr: function entry point
-			args: a sequence of 2-tuples containing parameters types and values to pass to the function; may be empty
-			ret: return address; may be None
-		"""
+        # TODO: resolve return value
 
-		# reserve slots for arguments
-		nslots = self.__count_slots(atype for atype, _ in args)
-		self.cc.reserve(nslots)
+        # unwind stack frame; note that function prototype sometimes does not
+        # reflect the actual number of arguments passed to the function, like
+        # in variadic functions (e.g. printf-like functions). in such case the
+        # function frame would not be unwinded entirely and cause the program
+        # to fail or produce funny results.
+        # 
+        # nevertheless this type of functions never unwind their own frame,
+        # exactly for the reason they are not aware of the actual number of
+        # arguments they got. since the caller is responsible for unwinding
+        # we should be good.
 
-		if ret is not None:
-			self.cc.setReturnAddress(ret)
+        nslots = self.__count_slots(proto.values())
+        retaddr = -1 if passthru else self.cc.unwind(nslots)
 
-		# set arguments values
-		self.writeParams(args)
+        return targs, retval, retaddr
 
-		# call
-		self.ql.arch.regs.arch_pc = addr
+    def call_native(self, addr: int, args: Sequence[Tuple[Any, int]], ret: Optional[int]) -> None:
+        """Call a native function after properly staging its arguments and return address.
+
+        Args:
+            addr: function entry point
+            args: a sequence of 2-tuples containing parameters types and values to pass to the function; may be empty
+            ret: return address; may be None
+        """
+
+        # reserve slots for arguments
+        nslots = self.__count_slots(atype for atype, _ in args)
+        self.cc.reserve(nslots)
+
+        if ret is not None:
+            self.cc.setReturnAddress(ret)
+
+        # set arguments values
+        self.writeParams(args)
+
+        # call
+        self.ql.arch.regs.arch_pc = addr

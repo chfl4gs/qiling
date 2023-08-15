@@ -74,7 +74,7 @@ class RegConf:
     def save(self, fname: str):
         if self.conf:
             with open(fname, 'wb') as ofile:
-                data = json.dumps(self.conf)
+                data = json.dumps(self.conf, indent=4)
 
                 ofile.write(data.encode('utf-8'))
 
@@ -178,11 +178,11 @@ class RegistryManager:
             self.reghive = RegHive(hivedir)
         except FileNotFoundError:
             if not ql.code:
-                QlErrorFileNotFound("Windows registry hive not found")
+                raise QlErrorFileNotFound("Windows registry hive not found")
 
         except Exception:
             if not ql.code:
-                QlErrorFileNotFound("Windows registry hive format error")
+                raise QlErrorFileNotFound("Windows registry hive format error")
 
         try:
             self.regconf = RegConf(self.regdiff)
